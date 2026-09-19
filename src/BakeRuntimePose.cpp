@@ -170,17 +170,9 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
         }
     }
 
-    if (runtimeData->getPhysicsConstraints().size() == 0) {
-        delete runtimeData;
-        return;
-    }
-
     std::set<std::string> liveConstraintBones;
     for (const auto &tc : skeleton.transformConstraints) {
         for (const auto &boneName : tc.bones) liveConstraintBones.insert(boneName);
-    }
-    for (const auto &ik : skeleton.ikConstraints) {
-        for (const auto &boneName : ik.bones) liveConstraintBones.insert(boneName);
     }
 
     std::set<std::string> physicsNames;
@@ -190,11 +182,6 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
         std::string name = pc->getBone()->getName().buffer();
         if (liveConstraintBones.contains(name)) continue;
         physicsNames.insert(std::move(name));
-    }
-    if (physicsNames.empty()) {
-        delete runtimeData;
-        std::cout << "Skipping physics rest bake: all physics bones are IK/transform subjects.\n";
-        return;
     }
 
     int bakedBones = 0;
@@ -382,7 +369,11 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
         }
     }
 
-    std::cout << "Baked idle+physics into 3.8 setup (IK/transform subjects kept live): "
+    // Solved IK is already in baked locals. Zero setup IK mix so Import Data
+    // does not apply it again. Transform mixes stay live (tousheng / mixX=-1).
+    for (auto &ik : skeleton.ikConstraints) ik.mix = 0.0f;
+
+    std::cout << "Baked idle+physics into 3.8 setup (transform subjects kept live): "
               << bakedBones << " bones, " << rebakedMeshes << " meshes.\n";
     delete runtimeData;
 }
