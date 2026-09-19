@@ -145,6 +145,13 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
             }
             if (std::fabs(ax) > 20000.0f || std::fabs(ay) > 20000.0f) continue;
 
+            // IK/transform helpers can report huge applied translations that
+            // are not real local motion. Skipping them keeps weighted hair/cloth
+            // on the authored bind bones.
+            const float dxProbe = ax - bone.x;
+            const float dyProbe = ay - bone.y;
+            if (std::hypot(dxProbe, dyProbe) > 200.0f) continue;
+
             float drot = wrapDeg(arot - bone.rotation);
             const bool rotationUnreliable = std::fabs(drot) > 90.0f &&
                                             bone.inherit != Inherit_Normal;
