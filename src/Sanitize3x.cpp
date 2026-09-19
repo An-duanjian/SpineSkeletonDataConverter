@@ -634,6 +634,121 @@ void stripDeformForAttachments(SkeletonData& skeleton, const std::set<std::strin
     }
 }
 
+int weightedInfluenceCount(const std::vector<float>& vertices, int vertexCount) {
+    if (vertexCount <= 0) return 0;
+    if (vertices.size() == static_cast<size_t>(vertexCount) * 2) return 0;
+    int influences = 0;
+    size_t i = 0;
+    for (int v = 0; v < vertexCount && i < vertices.size(); ++v) {
+        int boneCount = static_cast<int>(vertices[i++]);
+        influences += std::max(boneCount, 0);
+        i += static_cast<size_t>(std::max(boneCount, 0)) * 4;
+    }
+    return influences;
+}
+
+int expectedDeformFloats(const Attachment& attachment, const SkeletonData& skeleton) {
+    if (attachment.type == AttachmentType_Mesh) {
+        const auto& mesh = std::get<MeshAttachment>(attachment.data);
+        int vertexCount = mesh.uvs.empty() ? 0 : static_cast<int>(mesh.uvs.size() / 2);
+        int influences = weightedInfluenceCount(mesh.vertices, vertexCount);
+        if (influences > 0) return influences * 2;
+        return vertexCount * 2;
+    }
+    if (attachment.type == AttachmentType_Linkedmesh) {
+        const auto& linked = std::get<LinkedmeshAttachment>(attachment.data);
+        for (const auto& skin : skeleton.skins) {
+            for (const auto& [slotName, slotMap] : skin.attachments) {
+                auto it = slotMap.find(linked.parentMesh);
+                if (it == slotMap.end()) continue;
+                if (it->second.type == AttachmentType_Linkedmesh) continue;
+                return expectedDeformFloats(it->second, skeleton);
+            }
+        }
+        return 0;
+    }
+    if (attachment.type == AttachmentType_Path) {
+        const auto& path = std::get<PathAttachment>(attachment.data);
+        int influences = weightedInfluenceCount(path.vertices, path.vertexCount);
+        if (influences > 0) return influences * 2;
+        return path.vertexCount * 2;
+    }
+    if (attachment.type == AttachmentType_Clipping) {
+        const auto& clip = std::get<ClippingAttachment>(attachment.data);
+        int influences = weightedInfluenceCount(clip.vertices, clip.vertexCount);
+        if (influences > 0) return influences * 2;
+        return clip.vertexCount * 2;
+    }
+    if (attachment.type == AttachmentType_Boundingbox) {
+        const auto& box = std::get<BoundingboxAttachment>(attachment.data);
+        int influences = weightedInfluenceCount(box.vertices, box.vertexCount);
+        if (influences > 0) return influences * 2;
+        return box.vertexCount * 2;
+    }
+    return 0;
+}
+
+void clampDeformTimelinesFor3x(SkeletonData& skeleton) {
+    std::map<std::pair<std::string, std::string>, int> expected;
+    for (const auto& skin : skeleton.skins) {
+        for (const auto& [slotName, slotMap] : skin.attachments) {
+            for (const auto& [attName, attachment] : slotMap) {
+                int n = expectedDeformFloats(attachment, skeleton);
+                if (n > 0) expected[{slotName, attName}] = n;
+            }
+        }
+    }
+
+    int clamped = 0;
+    int stripped = 0;
+    for (auto& animation : skeleton.animations) {
+        for (auto skinIt = animation.attachments.begin(); skinIt != animation.attachments.end();) {
+            for (auto slotIt = skinIt->second.begin(); slotIt != skinIt->second.end();) {
+                for (auto attIt = slotIt->second.begin(); attIt != slotIt->second.end();) {
+                    auto expIt = expected.find({slotIt->first, attIt->first});
+                    if (expIt == expected.end() || !attIt->second.contains("deform")) {
+                        ++attIt;
+                        continue;
+                    }
+                    const int dest = expIt->second;
+                    auto& frames = attIt->second["deform"];
+                    bool any = false;
+                    for (auto& frame : frames) {
+                        int offset = frame.int1;
+                        if (offset < 0) offset = 0;
+                        if (offset >= dest) {
+                            frame.int1 = 0;
+                            frame.vertices.clear();
+                            clamped++;
+                            continue;
+                        }
+                        size_t allowed = static_cast<size_t>(dest - offset);
+                        if (frame.vertices.size() > allowed) {
+                            frame.vertices.resize(allowed);
+                            clamped++;
+                        }
+                        if (!frame.vertices.empty()) any = true;
+                    }
+                    if (!any) {
+                        attIt = slotIt->second.erase(attIt);
+                        stripped++;
+                    } else {
+                        ++attIt;
+                    }
+                }
+                if (slotIt->second.empty()) slotIt = skinIt->second.erase(slotIt);
+                else ++slotIt;
+            }
+            if (skinIt->second.empty()) skinIt = animation.attachments.erase(skinIt);
+            else ++skinIt;
+        }
+    }
+    if (clamped > 0 || stripped > 0) {
+        std::cout << "Clamped deform timelines for 3.8 import (" << clamped
+                  << " frames, " << stripped << " empty attachments removed).\n";
+    }
+}
+
 void bakeHighInfluenceMeshesFor3x(SkeletonData& skeleton) {
     // Spine 3.8.75 Import Data (decompiled ka/kR) accepts any number of bone
     // weights per vertex. It skins weighted meshes from the imported locals and

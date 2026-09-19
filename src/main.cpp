@@ -266,6 +266,7 @@ bool convertFile(const std::string& inputFile, const std::string& outputFile,
             generateMissingMeshEdges(skelData);
             bakeHighInfluenceMeshesFor3x(skelData);
             bakeRuntimePoseFor3x(skelData, inputFile);
+            clampDeformTimelinesFor3x(skelData);
         }
         
         // Write data using output version

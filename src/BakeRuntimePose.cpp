@@ -179,125 +179,106 @@ bool rebindVerticesToRuntimeBones(std::vector<float> &vertices, int vertexCount,
     return true;
 }
 
-float helperWeight(const std::vector<Influence> &infs, const std::vector<char> &farHelper) {
-    float w = 0;
-    for (const auto &inf : infs) {
-        if (inf.bone >= 0 && inf.bone < static_cast<int>(farHelper.size()) &&
-            farHelper[static_cast<size_t>(inf.bone)]) {
-            w += inf.w;
-        }
-    }
-    return w;
-}
-
-void keepTopInfluences(std::vector<Influence> &kept, int fallbackBone,
-                       float wx, float wy, spine::Vector<spine::Bone *> &bones) {
-    if (kept.empty() && fallbackBone >= 0) {
-        float nx = 0, ny = 0;
-        if (fallbackBone < static_cast<int>(bones.size()) && bones[fallbackBone] &&
-            std::isfinite(wx) && std::isfinite(wy)) {
-            bones[fallbackBone]->worldToLocal(wx, wy, nx, ny);
-        }
-        kept.push_back({fallbackBone, nx, ny, 1.0f});
-    }
-    std::sort(kept.begin(), kept.end(), [](const Influence &a, const Influence &b) {
-        return a.w > b.w;
-    });
-    if (kept.size() > 4) kept.resize(4);
+void applyWorldToInfluences(std::vector<Influence> &infs, float wx, float wy,
+                            spine::Vector<spine::Bone *> &bones) {
     float sum = 0;
-    for (const auto &k : kept) sum += k.w;
+    for (const auto &inf : infs) sum += inf.w;
     if (sum <= 0.0f) {
-        kept.clear();
-        return;
+        for (auto &inf : infs) inf.w = infs.empty() ? 0.0f : 1.0f / static_cast<float>(infs.size());
+    } else {
+        for (auto &inf : infs) inf.w /= sum;
     }
-    for (auto &k : kept) k.w /= sum;
-    for (auto &k : kept) {
-        if (k.bone < 0 || k.bone >= static_cast<int>(bones.size()) || !bones[k.bone]) continue;
+    for (auto &inf : infs) {
+        if (inf.bone < 0 || inf.bone >= static_cast<int>(bones.size()) || !bones[inf.bone]) continue;
         if (!std::isfinite(wx) || !std::isfinite(wy)) continue;
         float nx = 0, ny = 0;
-        bones[k.bone]->worldToLocal(wx, wy, nx, ny);
+        bones[inf.bone]->worldToLocal(wx, wy, nx, ny);
         if (std::isfinite(nx) && std::isfinite(ny) &&
             std::fabs(nx) < 20000.0f && std::fabs(ny) < 20000.0f) {
-            k.x = nx;
-            k.y = ny;
+            inf.x = nx;
+            inf.y = ny;
         }
     }
 }
 
-// Physics-anchor bones sit far from their parent and pin leftover strands in 3.8.
-// Snap those vertices onto the rest of the mesh, then drop the helper weights.
-bool compactFarHelperWeights(std::vector<float> &vertices, int vertexCount,
-                             std::vector<float> &world,
-                             const std::vector<char> &farHelper,
-                             spine::Vector<spine::Bone *> &bones) {
+bool compactMinorityFarWeights(std::vector<float> &vertices, int vertexCount,
+                               std::vector<float> &world,
+                               const std::vector<char> &farLocal,
+                               spine::Vector<spine::Bone *> &bones) {
     std::vector<std::vector<Influence>> parsed;
     if (!parseWeightedVertices(vertices, vertexCount, parsed)) return false;
     if (world.size() < static_cast<size_t>(vertexCount) * 2) return false;
 
+    std::vector<int> maxCount(farLocal.size(), 0);
+    for (const auto &infs : parsed) {
+        int bestBone = -1;
+        float bestW = 0;
+        for (const auto &inf : infs) {
+            if (inf.w > bestW) {
+                bestW = inf.w;
+                bestBone = inf.bone;
+            }
+        }
+        if (bestBone >= 0 && bestBone < static_cast<int>(maxCount.size())) {
+            maxCount[static_cast<size_t>(bestBone)]++;
+        }
+    }
+    std::vector<char> farMinority(farLocal.size(), 0);
+    const int minorityLimit = std::max(1, vertexCount * 3 / 10);
+    for (size_t i = 0; i < farLocal.size(); ++i) {
+        if (farLocal[i] && maxCount[i] > 0 && maxCount[i] < minorityLimit) farMinority[i] = 1;
+    }
+    bool uses = false;
     std::vector<int> inliers;
     inliers.reserve(static_cast<size_t>(vertexCount));
-    bool usesHelper = false;
     for (int v = 0; v < vertexCount; ++v) {
-        float hw = helperWeight(parsed[static_cast<size_t>(v)], farHelper);
-        if (hw > 0.0f) usesHelper = true;
+        float hw = 0;
+        for (const auto &inf : parsed[static_cast<size_t>(v)]) {
+            if (inf.bone >= 0 && inf.bone < static_cast<int>(farMinority.size()) &&
+                farMinority[static_cast<size_t>(inf.bone)]) {
+                hw += inf.w;
+            }
+        }
+        if (hw > 0.0f) uses = true;
         if (hw < 0.45f) inliers.push_back(v);
     }
-    if (!usesHelper || inliers.empty()) return false;
+    if (!uses || inliers.empty()) return false;
 
     bool changed = false;
     for (int v = 0; v < vertexCount; ++v) {
         auto &infs = parsed[static_cast<size_t>(v)];
-        float hw = helperWeight(infs, farHelper);
+        float hw = 0;
+        for (const auto &inf : infs) {
+            if (inf.bone >= 0 && inf.bone < static_cast<int>(farMinority.size()) &&
+                farMinority[static_cast<size_t>(inf.bone)]) {
+                hw += inf.w;
+            }
+        }
+        if (hw < 0.45f) continue;
         float wx = world[static_cast<size_t>(v) * 2];
         float wy = world[static_cast<size_t>(v) * 2 + 1];
-        int fallback = -1;
-        if (hw >= 0.45f) {
-            int nearest = inliers[0];
-            float best = std::numeric_limits<float>::max();
-            for (int u : inliers) {
-                float dx = world[static_cast<size_t>(u) * 2] - wx;
-                float dy = world[static_cast<size_t>(u) * 2 + 1] - wy;
-                float d = dx * dx + dy * dy;
-                if (d < best) {
-                    best = d;
-                    nearest = u;
-                }
-            }
-            wx = world[static_cast<size_t>(nearest) * 2];
-            wy = world[static_cast<size_t>(nearest) * 2 + 1];
-            world[static_cast<size_t>(v) * 2] = wx;
-            world[static_cast<size_t>(v) * 2 + 1] = wy;
-            for (const auto &inf : parsed[static_cast<size_t>(nearest)]) {
-                if (inf.bone >= 0 && inf.bone < static_cast<int>(farHelper.size()) &&
-                    farHelper[static_cast<size_t>(inf.bone)]) {
-                    continue;
-                }
-                fallback = inf.bone;
-                break;
-            }
-            changed = true;
-        }
-
-        if (hw < 0.45f) continue;
-
-        std::vector<Influence> kept;
-        kept.reserve(infs.size());
-        for (const auto &inf : infs) {
-            if (inf.w <= 0.0f) continue;
-            if (inf.bone >= 0 && inf.bone < static_cast<int>(farHelper.size()) &&
-                farHelper[static_cast<size_t>(inf.bone)]) {
-                continue;
-            }
-            kept.push_back(inf);
-        }
-        if (fallback < 0) {
-            for (const auto &inf : kept) {
-                fallback = inf.bone;
-                break;
+        int nearest = inliers[0];
+        float best = std::numeric_limits<float>::max();
+        for (int u : inliers) {
+            float dx = world[static_cast<size_t>(u) * 2] - wx;
+            float dy = world[static_cast<size_t>(u) * 2 + 1] - wy;
+            float d = dx * dx + dy * dy;
+            if (d < best) {
+                best = d;
+                nearest = u;
             }
         }
-        keepTopInfluences(kept, fallback, wx, wy, bones);
-        infs.swap(kept);
+        const auto &donor = parsed[static_cast<size_t>(nearest)];
+        if (donor.empty() || infs.empty()) continue;
+        wx = world[static_cast<size_t>(nearest) * 2];
+        wy = world[static_cast<size_t>(nearest) * 2 + 1];
+        world[static_cast<size_t>(v) * 2] = wx;
+        world[static_cast<size_t>(v) * 2 + 1] = wy;
+        for (size_t i = 0; i < infs.size(); ++i) {
+            infs[i].bone = donor[i % donor.size()].bone;
+            infs[i].w = donor[i % donor.size()].w;
+        }
+        applyWorldToInfluences(infs, wx, wy, bones);
         changed = true;
     }
     if (!changed) return false;
@@ -417,23 +398,16 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
             if (it != boneIndex.end()) physicsIdx.insert(it->second);
         }
 
-        std::set<std::string> invertedBones;
-        for (const auto &tc : skeleton.transformConstraints) {
-            if (tc.mixX < 0.0f || tc.mixY < 0.0f) {
-                for (const auto &boneName : tc.bones) invertedBones.insert(boneName);
-            }
-        }
-        std::vector<char> farHelper(skeleton.bones.size(), 0);
+        std::vector<char> farLocal(skeleton.bones.size(), 0);
         for (size_t i = 0; i < skeleton.bones.size(); ++i) {
             const BoneData &bone = skeleton.bones[i];
             if (!bone.parent || !bone.name) continue;
             if (physicsNames.contains(*bone.name) || liveConstraintBones.contains(*bone.name)) continue;
-            if (invertedBones.contains(*bone.name)) continue;
-            if (std::hypot(bone.x, bone.y) > 400.0f) farHelper[i] = 1;
+            if (std::hypot(bone.x, bone.y) > 400.0f) farLocal[i] = 1;
         }
-
         std::map<std::pair<std::string, std::string>, std::vector<float>> worldVerts;
         std::set<std::pair<std::string, std::string>> rebindKeys;
+        std::set<std::pair<std::string, std::string>> compactKeys;
         spine::Skin *skin = skel.getSkin();
         if (!skin) skin = runtimeData->getDefaultSkin();
         if (skin) {
@@ -474,21 +448,17 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
                     if (!verts || vc <= 0) continue;
                     auto used = vertexBoneIndices(*verts, vc);
                     bool usesPhysics = false;
-                    bool usesHelper = false;
                     bool usesLive = false;
                     for (int idx : used) {
                         if (physicsIdx.contains(idx)) usesPhysics = true;
-                        if (idx >= 0 && idx < static_cast<int>(farHelper.size()) &&
-                            farHelper[static_cast<size_t>(idx)]) {
-                            usesHelper = true;
-                        }
                         if (idx >= 0 && idx < static_cast<int>(skeleton.bones.size()) &&
                             skeleton.bones[static_cast<size_t>(idx)].name &&
                             liveConstraintBones.contains(*skeleton.bones[static_cast<size_t>(idx)].name)) {
                             usesLive = true;
                         }
                     }
-                    if (!usesLive && (usesPhysics || usesHelper)) rebindKeys.insert({slotName, attName});
+                    if (!usesLive && usesPhysics) rebindKeys.insert({slotName, attName});
+                    if (!usesLive) compactKeys.insert({slotName, attName});
                 }
             }
         }
@@ -497,15 +467,26 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
         for (auto &sk : skeleton.skins) {
             for (auto &[slotName, attachments] : sk.attachments) {
                 for (auto &[attName, attachment] : attachments) {
-                    if (!rebindKeys.contains({slotName, attName})) continue;
+                    if (!rebindKeys.contains({slotName, attName}) &&
+                        !compactKeys.contains({slotName, attName})) {
+                        continue;
+                    }
                     auto it = worldVerts.find({slotName, attName});
                     if (it == worldVerts.end()) continue;
                     auto [verts, vc] = weightedVerts(attachment);
                     if (!verts || vc <= 0) continue;
-                    bool did = rebindVerticesToRuntimeBones(*verts, vc, it->second, runtimeBones);
-                    if (compactFarHelperWeights(*verts, vc, it->second, farHelper, runtimeBones)) {
-                        compactedMeshes++;
-                        did = true;
+                    bool did = false;
+                    if (rebindKeys.contains({slotName, attName})) {
+                        did = rebindVerticesToRuntimeBones(*verts, vc, it->second, runtimeBones);
+                    }
+                    if (compactKeys.contains({slotName, attName})) {
+                        int rounds = 0;
+                        while (rounds < 4 &&
+                               compactMinorityFarWeights(*verts, vc, it->second, farLocal, runtimeBones)) {
+                            compactedMeshes += (rounds == 0);
+                            did = true;
+                            rounds++;
+                        }
                     }
                     if (did) rebakedMeshes++;
                 }
