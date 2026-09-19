@@ -625,6 +625,7 @@ void fillMeshSizesFromAtlas(SkeletonData& skeleton, const std::string& atlasPath
 void generateMissingMeshEdges(SkeletonData& skeleton);
 void normalizeMeshHullFor3x(SkeletonData& skeleton);
 void bakeHighInfluenceMeshesFor3x(SkeletonData& skeleton);
+void bakeRuntimePoseFor3x(SkeletonData& skeleton, const std::string& inputFile);
 std::string findSiblingAtlas(const std::string& inputFile);
 
 #endif // SKELETONDATA_H

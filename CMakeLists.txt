@@ -40,6 +40,7 @@ add_executable(SpineSkeletonDataConverter
     "src/OrderConverter.cpp"
     "src/RotateTimelineConverter.cpp"
     "src/Sanitize3x.cpp"
+    "src/BakeRuntimePose.cpp"
     "src/SpacingModeConverter.cpp"
     "src/SkeletonData35BinaryReader.cpp"
     "src/SkeletonData35BinaryWriter.cpp"
@@ -71,7 +72,10 @@ add_executable(SpineSkeletonDataConverter
     "src/SkeletonData42JsonWriter.cpp"
 )
 
-target_include_directories(SpineSkeletonDataConverter PRIVATE "include")
+target_include_directories(SpineSkeletonDataConverter PRIVATE
+    "include"
+    "spine/spine-cpp-42/include")
+target_link_libraries(SpineSkeletonDataConverter PRIVATE spine_cpp_42)
 
 add_executable(SpineAtlasDowngrade
     "src/SpineAtlasDowngrade.cpp"
