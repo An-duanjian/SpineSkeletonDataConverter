@@ -249,6 +249,25 @@ bool convertFile(const std::string& inputFile, const std::string& outputFile,
             std::cout << "Converting from 4.2 to below 4.2, adjusting constraint order...\n"; 
             convertOrder42ToBelow(skelData);
         }
+        if (aboveOrEqualVersion(inputVersion, SpineVersion::Version40) &&
+            belowOrEqualVersion(outputVersion, SpineVersion::Version38)) {
+            std::cout << "Sanitizing skeleton data for Spine 3.x editor import...\n";
+            sanitizeSkeletonDataFor3x(skelData);
+            std::string atlasPath = findSiblingAtlas(inputFile);
+            if (!atlasPath.empty()) {
+                fillMeshSizesFromAtlas(skelData, atlasPath);
+            } else {
+                fillMeshSizesFromAtlas(skelData, "");
+            }
+            // 3.8.75 Import Data (ka/kR): hull is vertex count H (editor does
+            // H<<1), edges are vertexIndex*2, weighted verts keep every
+            // influence, deform dest is 2*influences. Bake physics rest without
+            // rewriting weights; keep high-mix transform subjects live.
+            normalizeMeshHullFor3x(skelData);
+            generateMissingMeshEdges(skelData);
+            bakeRuntimePoseFor3x(skelData, inputFile);
+            clampDeformTimelinesFor3x(skelData);
+        }
         
         // Write data using output version
         switch (outputVersion) {
@@ -538,6 +557,18 @@ int main(int argc, char* argv[]) {
         if (convertFile(options.inputFile, options.outputFile, options.inputFormat, options.outputFormat, inputVersion, outputVersion, outputVersionString, options.removeCurve)) {
             std::cout << "Conversion completed successfully!\n";
             std::cout << "Output file: " << options.outputFile << "\n";
+            if (aboveOrEqualVersion(inputVersion, SpineVersion::Version40) &&
+                belowOrEqualVersion(outputVersion, SpineVersion::Version38)) {
+                std::string atlasPath = findSiblingAtlas(options.inputFile);
+                if (!atlasPath.empty()) {
+                    std::filesystem::path outDir = std::filesystem::path(options.outputFile).parent_path();
+                    if (outDir.empty()) outDir = std::filesystem::current_path();
+                    // 3.8.75 unpacks atlas pages as size/format/filter/repeat tuples.
+                    // 4.x omits format/repeat and uses bounds/offsets/scale, which
+                    // makes the editor treat filter "Linear" as Pixmap.Format.
+                    downgradeSpineAtlas(atlasPath, outDir.string());
+                }
+            }
             return 0;
         } else {
             std::cerr << "Conversion failed!\n";

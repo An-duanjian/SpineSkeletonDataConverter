@@ -620,5 +620,19 @@ void convertOrder42ToBelow(SkeletonData& skeleton);
 void convertSpacingMode4xTo3x(SkeletonData& skeleton);
 void convertRotateTimeline3xTo4x(SkeletonData& skeleton);
 void convertRotateTimeline4xTo3x(SkeletonData& skeleton);
+void sanitizeSkeletonDataFor3x(SkeletonData& skeleton);
+void fillMeshSizesFromAtlas(SkeletonData& skeleton, const std::string& atlasPath);
+void generateMissingMeshEdges(SkeletonData& skeleton);
+void normalizeMeshHullFor3x(SkeletonData& skeleton);
+void clampDeformTimelinesFor3x(SkeletonData& skeleton);
+void bakeRuntimePoseFor3x(SkeletonData& skeleton, const std::string& inputFile);
+std::string findSiblingAtlas(const std::string& inputFile);
+bool downgradeSpineAtlas(const std::string& inputAtlasPath, const std::string& outputDirPath);
+
+struct BoneWorld {
+    float a = 1, b = 0, c = 0, d = 1, x = 0, y = 0;
+};
+std::vector<BoneWorld> computeBoneWorlds(const SkeletonData& skeleton);
+void worldToLocal(const BoneWorld& bone, float worldX, float worldY, float& localX, float& localY);
 
 #endif // SKELETONDATA_H

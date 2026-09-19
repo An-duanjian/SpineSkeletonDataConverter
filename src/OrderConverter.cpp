@@ -1,4 +1,5 @@
 #include "SkeletonData.h"
+#include <algorithm>
 
 void convertOrder42ToBelow(SkeletonData& skeleton) {
     std::vector<size_t> orders; 
