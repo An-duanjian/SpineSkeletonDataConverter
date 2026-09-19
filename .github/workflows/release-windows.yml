@@ -1,0 +1,41 @@
+name: Release Windows binaries
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --target SpineSkeletonDataConverter SpineAtlasDowngrade
+
+      - name: Collect executables
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $wanted = @("SpineSkeletonDataConverter.exe", "SpineAtlasDowngrade.exe")
+          Get-ChildItem -Path build -Recurse -Filter *.exe |
+            Where-Object { $wanted -contains $_.Name } |
+            Copy-Item -Destination dist -Force
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/SpineSkeletonDataConverter.exe
+            dist/SpineAtlasDowngrade.exe
+          generate_release_notes: true
+          fail_on_unmatched_files: true
