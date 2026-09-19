@@ -749,11 +749,10 @@ void clampDeformTimelinesFor3x(SkeletonData& skeleton) {
 }
 
 void bakeHighInfluenceMeshesFor3x(SkeletonData& skeleton) {
-    // Spine 3.8.75 Import Data (decompiled ka/kR) accepts any number of bone
-    // weights per vertex. It skins weighted meshes from the imported locals and
-    // does not clamp to 4 influences. Rewriting weights or moving helper bones
-    // is asset-specific and distorts setup. Physics is already stripped; 3.8 can
-    // only show the authored bind pose, not a 4.2 physics rest pose.
+    // Spine 3.8.75 Import Data (ka.C / kR weighted path) accepts any number of
+    // bone weights per vertex: JSON is [count, bone, x, y, w, ...]. It never
+    // clamps to 4 influences and never snaps or retargets vertices. Physics rest
+    // is handled by bakeRuntimePoseFor3x, which only rewrites bone-local x/y.
     (void)skeleton;
 }
 

@@ -259,9 +259,10 @@ bool convertFile(const std::string& inputFile, const std::string& outputFile,
             } else {
                 fillMeshSizesFromAtlas(skelData, "");
             }
-            // 3.8.75 Import Data: hull is vertex count H (editor does H<<1),
-            // edges, atlas orig sizes, no physics. Bake a settled rest pose,
-            // keep high-mix transform subjects live, then match deform sizes.
+            // 3.8.75 Import Data (ka/kR): hull is vertex count H (editor does
+            // H<<1), edges are vertexIndex*2, weighted verts keep every
+            // influence, deform dest is 2*influences. Bake physics rest without
+            // rewriting weights; keep high-mix transform subjects live.
             normalizeMeshHullFor3x(skelData);
             generateMissingMeshEdges(skelData);
             bakeHighInfluenceMeshesFor3x(skelData);
