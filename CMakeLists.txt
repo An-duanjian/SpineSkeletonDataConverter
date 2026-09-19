@@ -41,6 +41,7 @@ add_executable(SpineSkeletonDataConverter
     "src/RotateTimelineConverter.cpp"
     "src/Sanitize3x.cpp"
     "src/BakeRuntimePose.cpp"
+    "src/SpineAtlasDowngrade.cpp"
     "src/SpacingModeConverter.cpp"
     "src/SkeletonData35BinaryReader.cpp"
     "src/SkeletonData35BinaryWriter.cpp"
@@ -79,6 +80,7 @@ target_link_libraries(SpineSkeletonDataConverter PRIVATE spine_cpp_42)
 
 add_executable(SpineAtlasDowngrade
     "src/SpineAtlasDowngrade.cpp"
+    "src/SpineAtlasDowngradeMain.cpp"
 )
 
 target_include_directories(SpineAtlasDowngrade PRIVATE "include")

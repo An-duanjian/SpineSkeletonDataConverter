@@ -568,31 +568,22 @@ bool scaleTextureImages(AtlasData& atlas, const fs::path& atlasDir, const fs::pa
 	return overallSuccess;
 }
 
-void printUsage(const char* programName) {
-	std::cout << "Usage: " << programName << " <input_atlas> <output_dir>" << std::endl;
-}
-
 } // namespace
 
-int main(int argc, char* argv[]) {
-	if (argc != 3) {
-		printUsage(argv[0]);
-		return 1;
-	}
-
-	fs::path inputAtlas = argv[1];
-	fs::path outputDir = argv[2];
+bool downgradeSpineAtlas(const std::string& inputAtlasPath, const std::string& outputDirPath) {
+	fs::path inputAtlas = inputAtlasPath;
+	fs::path outputDir = outputDirPath;
 
 	if (!fs::exists(inputAtlas)) {
 		std::cerr << "Error: Input atlas file not found: " << inputAtlas.string() << std::endl;
-		return 1;
+		return false;
 	}
 
 	std::error_code ec;
 	fs::create_directories(outputDir, ec);
 	if (ec) {
 		std::cerr << "Error: Failed to create output directory: " << outputDir.string() << std::endl;
-		return 1;
+		return false;
 	}
 
 	std::cout << "Converting Spine 4.x atlas: " << inputAtlas.filename().string() << std::endl;
@@ -602,7 +593,7 @@ int main(int argc, char* argv[]) {
 	std::string atlasContent;
 	if (!readFile(inputAtlas, atlasContent)) {
 		std::cerr << "Error: Failed to read atlas file." << std::endl;
-		return 1;
+		return false;
 	}
 
 	AtlasData atlasData = readAtlasData4x(atlasContent);
@@ -617,7 +608,7 @@ int main(int argc, char* argv[]) {
 	fs::path outputAtlasPath = outputDir / inputAtlas.filename();
 	if (!writeFile(outputAtlasPath, atlas3xContent)) {
 		std::cerr << "Error: Failed to write converted atlas file." << std::endl;
-		return 1;
+		return false;
 	}
 	std::cout << "[OK] Atlas file converted: " << outputAtlasPath.string() << std::endl;
 
@@ -625,9 +616,9 @@ int main(int argc, char* argv[]) {
 
 	std::cout << "--------------------------------------------------" << std::endl;
 	if (textureSuccess && unpackSuccess) {
-		std::cout << "Conversion completed." << std::endl;
-	} else {
-		std::cout << "Conversion completed with warnings." << std::endl;
+		std::cout << "Atlas downgrade completed.\n";
+		return true;
 	}
-	return 0;
+	std::cout << "Atlas downgrade completed with warnings.\n";
+	return textureSuccess;
 }

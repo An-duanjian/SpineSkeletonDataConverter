@@ -627,6 +627,7 @@ void normalizeMeshHullFor3x(SkeletonData& skeleton);
 void bakeHighInfluenceMeshesFor3x(SkeletonData& skeleton);
 void bakeRuntimePoseFor3x(SkeletonData& skeleton, const std::string& inputFile);
 std::string findSiblingAtlas(const std::string& inputFile);
+bool downgradeSpineAtlas(const std::string& inputAtlasPath, const std::string& outputDirPath);
 
 struct BoneWorld {
     float a = 1, b = 0, c = 0, d = 1, x = 0, y = 0;

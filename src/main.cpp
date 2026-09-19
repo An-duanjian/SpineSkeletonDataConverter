@@ -555,6 +555,18 @@ int main(int argc, char* argv[]) {
         if (convertFile(options.inputFile, options.outputFile, options.inputFormat, options.outputFormat, inputVersion, outputVersion, outputVersionString, options.removeCurve)) {
             std::cout << "Conversion completed successfully!\n";
             std::cout << "Output file: " << options.outputFile << "\n";
+            if (aboveOrEqualVersion(inputVersion, SpineVersion::Version40) &&
+                belowOrEqualVersion(outputVersion, SpineVersion::Version38)) {
+                std::string atlasPath = findSiblingAtlas(options.inputFile);
+                if (!atlasPath.empty()) {
+                    std::filesystem::path outDir = std::filesystem::path(options.outputFile).parent_path();
+                    if (outDir.empty()) outDir = std::filesystem::current_path();
+                    // 3.8.75 unpacks atlas pages as size/format/filter/repeat tuples.
+                    // 4.x omits format/repeat and uses bounds/offsets/scale, which
+                    // makes the editor treat filter "Linear" as Pixmap.Format.
+                    downgradeSpineAtlas(atlasPath, outDir.string());
+                }
+            }
             return 0;
         } else {
             std::cerr << "Conversion failed!\n";
