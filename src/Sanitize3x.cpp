@@ -8,6 +8,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <cstddef>
 
 namespace {
 
@@ -249,16 +250,22 @@ bool isWeightedVertices(const std::vector<float>& vertices, int vertexCount) {
     return vertexCount > 0 && vertices.size() != static_cast<size_t>(vertexCount * 2);
 }
 
-void limitVertexInfluences(std::vector<float>& vertices, int vertexCount, int maxBones) {
-    if (!isWeightedVertices(vertices, vertexCount) || maxBones < 1) return;
+struct Influence {
+    int bone = 0;
+    float x = 0, y = 0, w = 0;
+};
 
-    struct Influence {
-        int bone = 0;
-        float x = 0, y = 0, w = 0;
-    };
+struct DeformInfluenceRemap {
+    std::vector<char> keep;
+};
+
+bool limitVertexInfluences(std::vector<float>& vertices, int vertexCount, int maxBones, DeformInfluenceRemap& remap) {
+    if (!isWeightedVertices(vertices, vertexCount) || maxBones < 1) return false;
 
     std::vector<float> out;
     out.reserve(vertices.size());
+    remap.keep.clear();
+    bool changed = false;
     size_t i = 0;
     for (int v = 0; v < vertexCount && i < vertices.size(); ++v) {
         int boneCount = static_cast<int>(vertices[i++]);
@@ -272,18 +279,31 @@ void limitVertexInfluences(std::vector<float>& vertices, int vertexCount, int ma
             inf.w = vertices[i++];
             influences.push_back(inf);
         }
+
+        std::vector<char> keep(influences.size(), 1);
         if (static_cast<int>(influences.size()) > maxBones) {
-            std::partial_sort(influences.begin(), influences.begin() + maxBones, influences.end(),
-                              [](const Influence& a, const Influence& b) { return a.w > b.w; });
-            influences.resize(static_cast<size_t>(maxBones));
+            changed = true;
+            std::vector<int> order(influences.size());
+            for (size_t n = 0; n < order.size(); ++n) order[n] = static_cast<int>(n);
+            std::partial_sort(order.begin(), order.begin() + maxBones, order.end(),
+                              [&](int a, int b) { return influences[static_cast<size_t>(a)].w > influences[static_cast<size_t>(b)].w; });
+            std::fill(keep.begin(), keep.end(), 0);
+            for (int n = 0; n < maxBones; ++n) keep[static_cast<size_t>(order[static_cast<size_t>(n)])] = 1;
+        }
+        remap.keep.insert(remap.keep.end(), keep.begin(), keep.end());
+
+        std::vector<Influence> kept;
+        kept.reserve(static_cast<size_t>(maxBones));
+        for (size_t n = 0; n < influences.size(); ++n) {
+            if (keep[n]) kept.push_back(influences[n]);
         }
         float sum = 0.0f;
-        for (const auto& inf : influences) sum += inf.w;
+        for (const auto& inf : kept) sum += inf.w;
         if (sum > 0.0f) {
-            for (auto& inf : influences) inf.w /= sum;
+            for (auto& inf : kept) inf.w /= sum;
         }
-        out.push_back(static_cast<float>(influences.size()));
-        for (const auto& inf : influences) {
+        out.push_back(static_cast<float>(kept.size()));
+        for (const auto& inf : kept) {
             out.push_back(static_cast<float>(inf.bone));
             out.push_back(inf.x);
             out.push_back(inf.y);
@@ -291,43 +311,96 @@ void limitVertexInfluences(std::vector<float>& vertices, int vertexCount, int ma
         }
     }
     vertices.swap(out);
+    return changed;
+}
+
+void remapDeformFrame(TimelineFrame& frame, const DeformInfluenceRemap& remap) {
+    if (remap.keep.empty()) return;
+    const int oldCount = static_cast<int>(remap.keep.size());
+    const int oldFloats = oldCount * 2;
+    std::vector<float> full(static_cast<size_t>(oldFloats), 0.0f);
+    if (!frame.vertices.empty()) {
+        int start = frame.int1;
+        if (start < 0) start = 0;
+        for (size_t n = 0; n < frame.vertices.size(); ++n) {
+            int dst = start + static_cast<int>(n);
+            if (dst >= 0 && dst < oldFloats) full[static_cast<size_t>(dst)] = frame.vertices[n];
+        }
+    }
+
+    std::vector<float> neu;
+    neu.reserve(static_cast<size_t>(oldFloats));
+    for (int inf = 0; inf < oldCount; ++inf) {
+        if (!remap.keep[static_cast<size_t>(inf)]) continue;
+        neu.push_back(full[static_cast<size_t>(inf * 2)]);
+        neu.push_back(full[static_cast<size_t>(inf * 2 + 1)]);
+    }
+
+    size_t begin = 0;
+    while (begin < neu.size() && neu[begin] == 0.0f) ++begin;
+    size_t end = neu.size();
+    while (end > begin && neu[end - 1] == 0.0f) --end;
+    frame.int1 = static_cast<int>(begin);
+    frame.vertices.assign(neu.begin() + static_cast<std::ptrdiff_t>(begin), neu.begin() + static_cast<std::ptrdiff_t>(end));
+}
+
+void remapAnimationDeforms(SkeletonData& skeleton, const std::map<std::string, DeformInfluenceRemap>& remaps) {
+    if (remaps.empty()) return;
+    int remapped = 0;
+    for (auto& animation : skeleton.animations) {
+        for (auto& [skinName, skinMap] : animation.attachments) {
+            for (auto& [slotName, slotMap] : skinMap) {
+                for (auto& [attachmentName, timelines] : slotMap) {
+                    auto it = remaps.find(skinName + "\n" + slotName + "\n" + attachmentName);
+                    if (it == remaps.end()) it = remaps.find(std::string("default\n") + slotName + "\n" + attachmentName);
+                    if (it == remaps.end()) continue;
+                    auto deformIt = timelines.find("deform");
+                    if (deformIt == timelines.end()) continue;
+                    for (auto& frame : deformIt->second) {
+                        remapDeformFrame(frame, it->second);
+                    }
+                    remapped++;
+                }
+            }
+        }
+    }
+    std::cout << "Remapped deform timelines for " << remapped << " attachments after weight clamp.\n";
 }
 
 void limitWeightedInfluencesFor3x(SkeletonData& skeleton) {
     constexpr int kMaxBones = 4;
     int clamped = 0;
+    std::map<std::string, DeformInfluenceRemap> remaps;
+    auto clampAttachment = [&](const std::string& skinName, const std::string& slotName,
+                               const std::string& attachmentName, std::vector<float>& vertices, int vertexCount) {
+        if (!isWeightedVertices(vertices, vertexCount)) return;
+        DeformInfluenceRemap remap;
+        if (limitVertexInfluences(vertices, vertexCount, kMaxBones, remap) && !remap.keep.empty()) {
+            remaps[skinName + "\n" + slotName + "\n" + attachmentName] = std::move(remap);
+            clamped++;
+        }
+    };
+
     for (auto& skin : skeleton.skins) {
         for (auto& [slotName, slotMap] : skin.attachments) {
             for (auto& [attachmentName, attachment] : slotMap) {
                 if (attachment.type == AttachmentType_Mesh) {
                     auto& mesh = std::get<MeshAttachment>(attachment.data);
-                    int vertexCount = static_cast<int>(mesh.uvs.size() / 2);
-                    if (!isWeightedVertices(mesh.vertices, vertexCount)) continue;
-                    size_t before = mesh.vertices.size();
-                    limitVertexInfluences(mesh.vertices, vertexCount, kMaxBones);
-                    if (mesh.vertices.size() != before) clamped++;
+                    clampAttachment(skin.name, slotName, attachmentName, mesh.vertices, static_cast<int>(mesh.uvs.size() / 2));
                 } else if (attachment.type == AttachmentType_Path) {
                     auto& path = std::get<PathAttachment>(attachment.data);
-                    if (!isWeightedVertices(path.vertices, path.vertexCount)) continue;
-                    size_t before = path.vertices.size();
-                    limitVertexInfluences(path.vertices, path.vertexCount, kMaxBones);
-                    if (path.vertices.size() != before) clamped++;
+                    clampAttachment(skin.name, slotName, attachmentName, path.vertices, path.vertexCount);
                 } else if (attachment.type == AttachmentType_Clipping) {
                     auto& clipping = std::get<ClippingAttachment>(attachment.data);
-                    if (!isWeightedVertices(clipping.vertices, clipping.vertexCount)) continue;
-                    size_t before = clipping.vertices.size();
-                    limitVertexInfluences(clipping.vertices, clipping.vertexCount, kMaxBones);
-                    if (clipping.vertices.size() != before) clamped++;
+                    clampAttachment(skin.name, slotName, attachmentName, clipping.vertices, clipping.vertexCount);
                 } else if (attachment.type == AttachmentType_Boundingbox) {
                     auto& box = std::get<BoundingboxAttachment>(attachment.data);
-                    if (!isWeightedVertices(box.vertices, box.vertexCount)) continue;
-                    size_t before = box.vertices.size();
-                    limitVertexInfluences(box.vertices, box.vertexCount, kMaxBones);
-                    if (box.vertices.size() != before) clamped++;
+                    clampAttachment(skin.name, slotName, attachmentName, box.vertices, box.vertexCount);
                 }
             }
         }
     }
+    remapAnimationDeforms(skeleton, remaps);
     std::cout << "Limited weighted vertices to " << kMaxBones << " bones for " << clamped << " attachments (Spine 3.8 editor).\n";
 }
 
