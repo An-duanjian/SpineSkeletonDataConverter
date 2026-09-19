@@ -15,6 +15,7 @@
 #include <spine/SkeletonJson.h>
 #include <spine/Skin.h>
 #include <spine/Slot.h>
+#include <spine/SlotData.h>
 #include <spine/TextureLoader.h>
 #include <spine/VertexAttachment.h>
 
