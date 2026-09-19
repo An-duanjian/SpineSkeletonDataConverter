@@ -380,20 +380,6 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
         physicsNames.insert(std::move(name));
     }
 
-    std::map<std::string, std::string> boneParent;
-    for (const auto &bone : skeleton.bones) {
-        if (bone.name && bone.parent) boneParent[*bone.name] = *bone.parent;
-    }
-    auto hasLiveAncestor = [&](const std::string &name) {
-        std::string cur = name;
-        std::set<std::string> seen;
-        while (boneParent.contains(cur) && seen.insert(cur).second) {
-            cur = boneParent[cur];
-            if (liveConstraintBones.contains(cur)) return true;
-        }
-        return false;
-    };
-
     int bakedBones = 0;
     int rebakedMeshes = 0;
     int compactedMeshes = 0;
@@ -438,7 +424,6 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
         }
         std::map<std::pair<std::string, std::string>, std::vector<float>> worldVerts;
         std::set<std::pair<std::string, std::string>> rebindKeys;
-        std::set<std::pair<std::string, std::string>> compactKeys;
         spine::Skin *skin = skel.getSkin();
         if (!skin) skin = runtimeData->getDefaultSkin();
         if (skin) {
@@ -489,7 +474,6 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
                         }
                     }
                     if (!usesLive && usesPhysics) rebindKeys.insert({slotName, attName});
-                    if (!usesLive) compactKeys.insert({slotName, attName});
                 }
             }
         }
@@ -498,10 +482,7 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
         for (auto &sk : skeleton.skins) {
             for (auto &[slotName, attachments] : sk.attachments) {
                 for (auto &[attName, attachment] : attachments) {
-                    if (!rebindKeys.contains({slotName, attName}) &&
-                        !compactKeys.contains({slotName, attName})) {
-                        continue;
-                    }
+                    if (!rebindKeys.contains({slotName, attName})) continue;
                     auto it = worldVerts.find({slotName, attName});
                     if (it == worldVerts.end()) continue;
                     auto [verts, vc] = weightedVerts(attachment);
@@ -510,7 +491,7 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
                     if (rebindKeys.contains({slotName, attName})) {
                         did = rebindVerticesToRuntimeBones(*verts, vc, it->second, runtimeBones);
                     }
-                    if (compactKeys.contains({slotName, attName})) {
+                    if (rebindKeys.contains({slotName, attName})) {
                         int rounds = 0;
                         while (rounds < 4 &&
                                compactMinorityFarWeights(*verts, vc, it->second, farLocal, runtimeBones)) {
@@ -529,7 +510,11 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
             spine::Bone *rb = skel.findBone(bone.name->c_str());
             if (!rb) continue;
 
-            if (rb->getParent() && !hasLiveAncestor(*bone.name)) {
+            const bool physicsBone = physicsNames.contains(*bone.name);
+            // Physics edits world after applied locals. Only invert that on the
+            // physics bone itself; doing it on children (arms, noScale hair)
+            // rebuilds locals from a parent world that no longer matches.
+            if (physicsBone && rb->getParent()) {
                 rb->updateAppliedTransform();
             }
 
@@ -547,10 +532,8 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
             }
             if (std::fabs(ax) > 20000.0f || std::fabs(ay) > 20000.0f) continue;
 
-            float drot = wrapDeg(arot - bone.rotation);
-            const bool rotationUnreliable = std::fabs(drot) > 90.0f &&
-                                            bone.inherit != Inherit_Normal;
-            if (rotationUnreliable) drot = 0.0f;
+            const bool inheritNormal = bone.inherit == Inherit_Normal;
+            float drot = inheritNormal ? wrapDeg(arot - bone.rotation) : 0.0f;
 
             PoseDelta d;
             d.dx = ax - bone.x;
@@ -558,10 +541,10 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
             d.drot = drot;
             d.oldScaleX = bone.scaleX;
             d.oldScaleY = bone.scaleY;
-            d.newScaleX = asx != 0.0f ? asx : bone.scaleX;
-            d.newScaleY = asy != 0.0f ? asy : bone.scaleY;
-            d.dshearX = ashx - bone.shearX;
-            d.dshearY = ashy - bone.shearY;
+            d.newScaleX = inheritNormal && asx != 0.0f ? asx : bone.scaleX;
+            d.newScaleY = inheritNormal && asy != 0.0f ? asy : bone.scaleY;
+            d.dshearX = inheritNormal ? ashx - bone.shearX : 0.0f;
+            d.dshearY = inheritNormal ? ashy - bone.shearY : 0.0f;
             if (nearlyEqual(d.dx, 0.0f) && nearlyEqual(d.dy, 0.0f) &&
                 nearlyEqual(d.drot, 0.0f) &&
                 nearlyEqual(d.newScaleX, d.oldScaleX) &&
@@ -572,11 +555,13 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
             deltas[*bone.name] = d;
             bone.x = ax;
             bone.y = ay;
-            if (!rotationUnreliable) bone.rotation = wrapDeg(arot);
-            if (asx != 0.0f) bone.scaleX = asx;
-            if (asy != 0.0f) bone.scaleY = asy;
-            bone.shearX = ashx;
-            bone.shearY = ashy;
+            if (inheritNormal) bone.rotation = wrapDeg(arot);
+            if (inheritNormal && asx != 0.0f) bone.scaleX = asx;
+            if (inheritNormal && asy != 0.0f) bone.scaleY = asy;
+            if (inheritNormal) {
+                bone.shearX = ashx;
+                bone.shearY = ashy;
+            }
             bakedBones++;
         }
     }
