@@ -200,6 +200,28 @@ void pruneEmptyTimelines(MultiTimeline& timelines) {
 
 }
 
+void normalizeMeshHullFor3x(SkeletonData& skeleton) {
+    int converted = 0;
+    for (auto& skin : skeleton.skins) {
+        for (auto& [slotName, slotMap] : skin.attachments) {
+            for (auto& [attachmentName, attachment] : slotMap) {
+                if (attachment.type != AttachmentType_Mesh) continue;
+                auto& mesh = std::get<MeshAttachment>(attachment.data);
+                int vertexCount = static_cast<int>(mesh.uvs.size() / 2);
+                if (vertexCount <= 0 || mesh.hullLength <= 0) continue;
+                int triangleCount = static_cast<int>(mesh.triangles.size() / 3);
+                if (mesh.hullLength % 2 == 0 &&
+                    (vertexCount * 2 - mesh.hullLength - 2) == triangleCount) {
+                    mesh.hullLength /= 2;
+                    converted++;
+                }
+                if (mesh.hullLength > vertexCount) mesh.hullLength = vertexCount;
+            }
+        }
+    }
+    std::cout << "Normalized " << converted << " mesh hull values from 4.x world-units to 3.8 JSON vertex counts.\n";
+}
+
 void generateMissingMeshEdges(SkeletonData& skeleton) {
     int generated = 0;
     for (auto& skin : skeleton.skins) {
