@@ -1,8 +1,13 @@
 #include "SkeletonData.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <map>
 #include <set>
+#include <sstream>
 
 namespace {
 
@@ -290,4 +295,209 @@ void sanitizeSkeletonDataFor3x(SkeletonData& skeleton) {
     }
 
     convertOrder42ToBelow(skeleton);
+}
+
+namespace {
+
+struct AtlasRegionSize {
+    int width = 0;
+    int height = 0;
+};
+
+std::string trimCopy(const std::string& input) {
+    size_t start = 0;
+    size_t end = input.size();
+    while (start < end && std::isspace(static_cast<unsigned char>(input[start]))) ++start;
+    while (end > start && std::isspace(static_cast<unsigned char>(input[end - 1]))) --end;
+    return input.substr(start, end - start);
+}
+
+int roundDiv(int value, double scale) {
+    if (scale == 1.0) return value;
+    return static_cast<int>(std::lround(static_cast<double>(value) / scale));
+}
+
+bool isPlaceholderSize(float width, float height) {
+    return (width == 32.0f && height == 32.0f) || (width == 0.0f && height == 0.0f);
+}
+
+std::map<std::string, AtlasRegionSize> parseAtlasRegionSizes(const std::string& atlasPath) {
+    std::map<std::string, AtlasRegionSize> sizes;
+    std::ifstream ifs(atlasPath);
+    if (!ifs) return sizes;
+
+    double pageScale = 1.0;
+    std::string currentName;
+    AtlasRegionSize current;
+    bool hasRegion = false;
+    bool seenPageName = false;
+
+    auto flushRegion = [&]() {
+        if (!hasRegion || currentName.empty()) return;
+        if (current.width <= 0) current.width = 0;
+        if (current.height <= 0) current.height = 0;
+        if (current.width > 0 && current.height > 0) {
+            sizes[currentName] = {
+                roundDiv(current.width, pageScale),
+                roundDiv(current.height, pageScale)
+            };
+        }
+        hasRegion = false;
+        current = {};
+        currentName.clear();
+    };
+
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        std::string trimmed = trimCopy(line);
+        if (trimmed.empty()) {
+            flushRegion();
+            seenPageName = false;
+            pageScale = 1.0;
+            continue;
+        }
+
+        auto colon = trimmed.find(':');
+        if (colon == std::string::npos) {
+            if (!seenPageName) {
+                seenPageName = true;
+                continue;
+            }
+            flushRegion();
+            currentName = trimmed;
+            hasRegion = true;
+            current = {};
+            continue;
+        }
+
+        std::string key = trimCopy(trimmed.substr(0, colon));
+        std::string values = trimCopy(trimmed.substr(colon + 1));
+        std::vector<int> ints;
+        std::stringstream ss(values);
+        std::string part;
+        while (std::getline(ss, part, ',')) {
+            try {
+                ints.push_back(std::stoi(trimCopy(part)));
+            } catch (...) {
+            }
+        }
+
+        if (!hasRegion && key == "scale") {
+            try {
+                pageScale = std::stod(values);
+                if (pageScale == 0.0) pageScale = 1.0;
+            } catch (...) {
+                pageScale = 1.0;
+            }
+            continue;
+        }
+
+        if (!hasRegion) continue;
+
+        if (key == "offsets" && ints.size() >= 4) {
+            current.width = ints[2];
+            current.height = ints[3];
+        } else if (key == "orig" && ints.size() >= 2) {
+            current.width = ints[0];
+            current.height = ints[1];
+        } else if ((key == "bounds" || key == "size") && ints.size() >= (key == "bounds" ? 4 : 2) && current.width == 0) {
+            if (key == "bounds" && ints.size() >= 4) {
+                current.width = ints[2];
+                current.height = ints[3];
+            } else if (key == "size" && ints.size() >= 2) {
+                current.width = ints[0];
+                current.height = ints[1];
+            }
+        }
+    }
+    flushRegion();
+    return sizes;
+}
+
+const AtlasRegionSize* findRegionSize(const std::map<std::string, AtlasRegionSize>& sizes, const Attachment& attachment, const std::string& keyName) {
+    std::vector<std::string> candidates;
+    if (!attachment.path.empty()) candidates.push_back(attachment.path);
+    if (!attachment.name.empty()) candidates.push_back(attachment.name);
+    if (!keyName.empty()) candidates.push_back(keyName);
+    for (const auto& candidate : candidates) {
+        auto it = sizes.find(candidate);
+        if (it != sizes.end()) return &it->second;
+    }
+    return nullptr;
+}
+
+void applySize(float& width, float& height, const AtlasRegionSize& size) {
+    if (size.width > 0) width = static_cast<float>(size.width);
+    if (size.height > 0) height = static_cast<float>(size.height);
+}
+
+void fillUnweightedMeshSize(MeshAttachment& mesh) {
+    if (!isPlaceholderSize(mesh.width, mesh.height)) return;
+    int vertexCount = static_cast<int>(mesh.uvs.size() / 2);
+    if (vertexCount <= 0 || mesh.vertices.size() != static_cast<size_t>(vertexCount * 2)) return;
+    float minX = mesh.vertices[0], maxX = mesh.vertices[0];
+    float minY = mesh.vertices[1], maxY = mesh.vertices[1];
+    for (int i = 0; i < vertexCount; ++i) {
+        minX = std::min(minX, mesh.vertices[i * 2]);
+        maxX = std::max(maxX, mesh.vertices[i * 2]);
+        minY = std::min(minY, mesh.vertices[i * 2 + 1]);
+        maxY = std::max(maxY, mesh.vertices[i * 2 + 1]);
+    }
+    float w = maxX - minX;
+    float h = maxY - minY;
+    if (w > 1.0f && h > 1.0f) {
+        mesh.width = w;
+        mesh.height = h;
+    }
+}
+
+}
+
+void fillMeshSizesFromAtlas(SkeletonData& skeleton, const std::string& atlasPath) {
+    auto sizes = parseAtlasRegionSizes(atlasPath);
+    int filled = 0;
+    for (auto& skin : skeleton.skins) {
+        for (auto& [slotName, slotMap] : skin.attachments) {
+            for (auto& [attachmentName, attachment] : slotMap) {
+                const AtlasRegionSize* size = sizes.empty() ? nullptr : findRegionSize(sizes, attachment, attachmentName);
+                if (attachment.type == AttachmentType_Mesh) {
+                    auto& mesh = std::get<MeshAttachment>(attachment.data);
+                    if (size && isPlaceholderSize(mesh.width, mesh.height)) {
+                        applySize(mesh.width, mesh.height, *size);
+                        filled++;
+                    } else {
+                        fillUnweightedMeshSize(mesh);
+                    }
+                } else if (attachment.type == AttachmentType_Linkedmesh) {
+                    auto& linked = std::get<LinkedmeshAttachment>(attachment.data);
+                    if (size && isPlaceholderSize(linked.width, linked.height)) {
+                        applySize(linked.width, linked.height, *size);
+                        filled++;
+                    }
+                }
+            }
+        }
+    }
+    if (!atlasPath.empty()) {
+        std::cout << "Filled mesh/linkedmesh sizes from atlas (" << filled << " attachments): " << atlasPath << "\n";
+    }
+}
+
+std::string findSiblingAtlas(const std::string& inputFile) {
+    namespace fs = std::filesystem;
+    fs::path input(inputFile);
+    fs::path direct = input;
+    direct.replace_extension(".atlas");
+    if (fs::exists(direct)) return direct.string();
+
+    fs::path dir = input.parent_path();
+    if (dir.empty()) dir = fs::current_path();
+    std::error_code ec;
+    if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) return "";
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        if (!entry.is_regular_file()) continue;
+        if (entry.path().extension() == ".atlas") return entry.path().string();
+    }
+    return "";
 }

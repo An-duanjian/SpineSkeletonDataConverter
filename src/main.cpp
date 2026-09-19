@@ -253,6 +253,12 @@ bool convertFile(const std::string& inputFile, const std::string& outputFile,
             belowOrEqualVersion(outputVersion, SpineVersion::Version38)) {
             std::cout << "Sanitizing skeleton data for Spine 3.x editor import...\n";
             sanitizeSkeletonDataFor3x(skelData);
+            std::string atlasPath = findSiblingAtlas(inputFile);
+            if (!atlasPath.empty()) {
+                fillMeshSizesFromAtlas(skelData, atlasPath);
+            } else {
+                fillMeshSizesFromAtlas(skelData, "");
+            }
         }
         
         // Write data using output version
