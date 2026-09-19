@@ -228,30 +228,15 @@ bool snapMinorityFarVertices(std::vector<float> &vertices, int vertexCount,
             maxCount[static_cast<size_t>(bestBone)]++;
         }
     }
+    // Extra weights on far helpers (including tiny mixX<0 handles) stretch
+    // triangles in 3.8 mesh edit. Only skip bones that actually skin most verts.
     std::vector<char> farMinority(farLocal.size(), 0);
-    const int minorityLimit = std::max(1, vertexCount * 3 / 10);
+    const int majority = std::max(1, vertexCount * 7 / 10);
     for (size_t i = 0; i < farLocal.size(); ++i) {
-        if (farLocal[i] && maxCount[i] > 0 && maxCount[i] < minorityLimit) farMinority[i] = 1;
+        if (farLocal[i] && maxCount[i] < majority) farMinority[i] = 1;
     }
-    bool uses = false;
-    std::vector<int> inliers;
-    inliers.reserve(static_cast<size_t>(vertexCount));
-    for (int v = 0; v < vertexCount; ++v) {
-        float hw = 0;
-        for (const auto &inf : parsed[static_cast<size_t>(v)]) {
-            if (inf.bone >= 0 && inf.bone < static_cast<int>(farMinority.size()) &&
-                farMinority[static_cast<size_t>(inf.bone)]) {
-                hw += inf.w;
-            }
-        }
-        if (hw > 0.0f) uses = true;
-        if (hw < 0.45f) inliers.push_back(v);
-    }
-    if (!uses || inliers.empty()) return false;
 
-    bool changed = false;
-    for (int v = 0; v < vertexCount; ++v) {
-        auto &infs = parsed[static_cast<size_t>(v)];
+    auto minorityWeight = [&](const std::vector<Influence> &infs) {
         float hw = 0;
         for (const auto &inf : infs) {
             if (inf.bone >= 0 && inf.bone < static_cast<int>(farMinority.size()) &&
@@ -259,9 +244,35 @@ bool snapMinorityFarVertices(std::vector<float> &vertices, int vertexCount,
                 hw += inf.w;
             }
         }
-        if (hw < 0.45f) continue;
-        float wx = world[static_cast<size_t>(v) * 2];
-        float wy = world[static_cast<size_t>(v) * 2 + 1];
+        return hw;
+    };
+
+    std::vector<int> inliers;
+    inliers.reserve(static_cast<size_t>(vertexCount));
+    for (int v = 0; v < vertexCount; ++v) {
+        if (minorityWeight(parsed[static_cast<size_t>(v)]) < 0.2f) inliers.push_back(v);
+    }
+    if (inliers.empty()) return false;
+
+    float cx = 0, cy = 0;
+    for (int u : inliers) {
+        cx += world[static_cast<size_t>(u) * 2];
+        cy += world[static_cast<size_t>(u) * 2 + 1];
+    }
+    cx /= static_cast<float>(inliers.size());
+    cy /= static_cast<float>(inliers.size());
+    std::vector<float> radii;
+    radii.reserve(inliers.size());
+    for (int u : inliers) {
+        float dx = world[static_cast<size_t>(u) * 2] - cx;
+        float dy = world[static_cast<size_t>(u) * 2 + 1] - cy;
+        radii.push_back(std::hypot(dx, dy));
+    }
+    std::sort(radii.begin(), radii.end());
+    const float inlierRadius = radii[radii.size() / 2];
+    const float snapDist = std::max(80.0f, inlierRadius * 2.5f);
+
+    auto nearestInlier = [&](float wx, float wy) {
         int nearest = inliers[0];
         float best = std::numeric_limits<float>::max();
         for (int u : inliers) {
@@ -273,17 +284,50 @@ bool snapMinorityFarVertices(std::vector<float> &vertices, int vertexCount,
                 nearest = u;
             }
         }
-        const auto &donor = parsed[static_cast<size_t>(nearest)];
-        if (donor.empty() || infs.empty()) continue;
-        wx = world[static_cast<size_t>(nearest) * 2];
-        wy = world[static_cast<size_t>(nearest) * 2 + 1];
-        world[static_cast<size_t>(v) * 2] = wx;
-        world[static_cast<size_t>(v) * 2 + 1] = wy;
-        for (size_t i = 0; i < infs.size(); ++i) {
-            infs[i].bone = donor[i % donor.size()].bone;
-            infs[i].w = donor[i % donor.size()].w;
+        return nearest;
+    };
+
+    bool changed = false;
+    for (int v = 0; v < vertexCount; ++v) {
+        auto &infs = parsed[static_cast<size_t>(v)];
+        if (infs.empty()) continue;
+        float hw = minorityWeight(infs);
+        float wx = world[static_cast<size_t>(v) * 2];
+        float wy = world[static_cast<size_t>(v) * 2 + 1];
+        float dist = std::hypot(wx - cx, wy - cy);
+        const bool outlier = hw >= 0.2f || dist > snapDist;
+        if (outlier) {
+            int nearest = nearestInlier(wx, wy);
+            const auto &donor = parsed[static_cast<size_t>(nearest)];
+            if (donor.empty()) continue;
+            world[static_cast<size_t>(v) * 2] = world[static_cast<size_t>(nearest) * 2];
+            world[static_cast<size_t>(v) * 2 + 1] = world[static_cast<size_t>(nearest) * 2 + 1];
+            for (size_t i = 0; i < infs.size(); ++i) {
+                infs[i].bone = donor[i % donor.size()].bone;
+                infs[i].w = donor[i % donor.size()].w;
+            }
+            changed = true;
+            continue;
         }
-        changed = true;
+        int fallback = -1;
+        float fallbackW = 0;
+        for (const auto &inf : infs) {
+            bool far = inf.bone >= 0 && inf.bone < static_cast<int>(farMinority.size()) &&
+                       farMinority[static_cast<size_t>(inf.bone)];
+            if (!far && inf.w > fallbackW) {
+                fallback = inf.bone;
+                fallbackW = inf.w;
+            }
+        }
+        if (fallback < 0) continue;
+        for (auto &inf : infs) {
+            bool far = inf.bone >= 0 && inf.bone < static_cast<int>(farMinority.size()) &&
+                       farMinority[static_cast<size_t>(inf.bone)];
+            if (far) {
+                inf.bone = fallback;
+                changed = true;
+            }
+        }
     }
     if (!changed) return false;
     writeWeightedVertices(parsed, vertices);
@@ -396,7 +440,10 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
             const BoneData &bone = skeleton.bones[i];
             if (!bone.parent || !bone.name) continue;
             if (physicsNames.contains(*bone.name) || liveConstraintBones.contains(*bone.name)) continue;
-            if (std::hypot(bone.x, bone.y) > farThresh) farLocal[i] = 1;
+            float dist = std::hypot(bone.x, bone.y);
+            // Real limbs have length ≈ translation; physics-anchor helpers are
+            // short bones parked far from their parent.
+            if (dist > farThresh && bone.length < dist * 0.25f) farLocal[i] = 1;
         }
         std::map<std::pair<std::string, std::string>, std::vector<float>> worldVerts;
         std::set<std::pair<std::string, std::string>> rebindKeys;
@@ -441,15 +488,20 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
                     auto used = vertexBoneIndices(*verts, vc);
                     bool usesPhysics = false;
                     bool usesLive = false;
+                    bool usesFar = false;
                     for (int idx : used) {
                         if (physicsIdx.contains(idx)) usesPhysics = true;
+                        if (idx >= 0 && idx < static_cast<int>(farLocal.size()) &&
+                            farLocal[static_cast<size_t>(idx)]) {
+                            usesFar = true;
+                        }
                         if (idx >= 0 && idx < static_cast<int>(skeleton.bones.size()) &&
                             skeleton.bones[static_cast<size_t>(idx)].name &&
                             liveConstraintBones.contains(*skeleton.bones[static_cast<size_t>(idx)].name)) {
                             usesLive = true;
                         }
                     }
-                    if (!usesLive && usesPhysics) rebindKeys.insert({slotName, attName});
+                    if (!usesLive && (usesPhysics || usesFar)) rebindKeys.insert({slotName, attName});
                 }
             }
         }
