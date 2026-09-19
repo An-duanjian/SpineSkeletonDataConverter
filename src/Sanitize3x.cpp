@@ -449,27 +449,76 @@ void worldToLocal(const BoneWorld& bone, float worldX, float worldY, float& loca
     localY = (dy * bone.a - dx * bone.c) * inv;
 }
 
-void bakeMeshToUnweighted(MeshAttachment& mesh, const BoneWorld& slotBone, const std::vector<BoneWorld>& worlds) {
-    int vertexCount = static_cast<int>(mesh.uvs.size() / 2);
-    if (vertexCount <= 0 || !isWeightedVertices(mesh.vertices, vertexCount)) return;
-    std::vector<float> local(static_cast<size_t>(vertexCount) * 2, 0.0f);
-    size_t i = 0;
-    for (int v = 0; v < vertexCount && i < mesh.vertices.size(); ++v) {
-        int boneCount = static_cast<int>(mesh.vertices[i++]);
-        float wx = 0, wy = 0;
-        for (int b = 0; b < boneCount && i + 3 < mesh.vertices.size(); ++b) {
-            int boneIndex = static_cast<int>(std::lround(mesh.vertices[i++]));
-            float lx = mesh.vertices[i++];
-            float ly = mesh.vertices[i++];
-            float weight = mesh.vertices[i++];
-            if (boneIndex < 0 || boneIndex >= static_cast<int>(worlds.size())) continue;
-            const BoneWorld& bw = worlds[static_cast<size_t>(boneIndex)];
-            wx += weight * (bw.a * lx + bw.b * ly + bw.x);
-            wy += weight * (bw.c * lx + bw.d * ly + bw.y);
-        }
-        worldToLocal(slotBone, wx, wy, local[static_cast<size_t>(v) * 2], local[static_cast<size_t>(v) * 2 + 1]);
+struct BoneInfluence {
+    int bone = 0;
+    float lx = 0, ly = 0, weight = 0;
+};
+
+void skinWorld(const std::vector<BoneInfluence>& inf, const std::vector<BoneWorld>& worlds, float& wx, float& wy) {
+    wx = 0;
+    wy = 0;
+    for (const auto& infItem : inf) {
+        if (infItem.bone < 0 || infItem.bone >= static_cast<int>(worlds.size())) continue;
+        const BoneWorld& bw = worlds[static_cast<size_t>(infItem.bone)];
+        wx += infItem.weight * (bw.a * infItem.lx + bw.b * infItem.ly + bw.x);
+        wy += infItem.weight * (bw.c * infItem.lx + bw.d * infItem.ly + bw.y);
     }
-    mesh.vertices.swap(local);
+}
+
+void collapseInfluencesFor3x(std::vector<BoneInfluence>& inf, const std::vector<BoneWorld>& worlds, int fallbackBone) {
+    if (inf.size() <= 4) return;
+    float wx = 0, wy = 0;
+    skinWorld(inf, worlds, wx, wy);
+    std::sort(inf.begin(), inf.end(), [](const BoneInfluence& a, const BoneInfluence& b) {
+        return a.weight > b.weight;
+    });
+    inf.resize(4);
+    float sum = 0;
+    for (const auto& item : inf) sum += item.weight;
+    if (sum <= 1e-8f) {
+        inf.clear();
+        BoneInfluence one;
+        one.bone = fallbackBone;
+        one.weight = 1.0f;
+        worldToLocal(worlds[static_cast<size_t>(std::max(0, fallbackBone))], wx, wy, one.lx, one.ly);
+        inf.push_back(one);
+        return;
+    }
+    for (auto& item : inf) {
+        item.weight /= sum;
+        if (item.bone < 0 || item.bone >= static_cast<int>(worlds.size())) item.bone = fallbackBone;
+        worldToLocal(worlds[static_cast<size_t>(item.bone)], wx, wy, item.lx, item.ly);
+    }
+}
+
+void writeWeightedVertices(const std::vector<std::vector<BoneInfluence>>& vertices, std::vector<float>& out) {
+    out.clear();
+    for (const auto& inf : vertices) {
+        out.push_back(static_cast<float>(inf.size()));
+        for (const auto& item : inf) {
+            out.push_back(static_cast<float>(item.bone));
+            out.push_back(item.lx);
+            out.push_back(item.ly);
+            out.push_back(item.weight);
+        }
+    }
+}
+
+bool parseWeightedVertices(const std::vector<float>& vertices, int vertexCount, std::vector<std::vector<BoneInfluence>>& parsed) {
+    parsed.assign(static_cast<size_t>(vertexCount), {});
+    size_t i = 0;
+    for (int v = 0; v < vertexCount && i < vertices.size(); ++v) {
+        int boneCount = static_cast<int>(vertices[i++]);
+        for (int b = 0; b < boneCount && i + 3 < vertices.size(); ++b) {
+            BoneInfluence item;
+            item.bone = static_cast<int>(std::lround(vertices[i++]));
+            item.lx = vertices[i++];
+            item.ly = vertices[i++];
+            item.weight = vertices[i++];
+            parsed[static_cast<size_t>(v)].push_back(item);
+        }
+    }
+    return i <= vertices.size();
 }
 
 void stripDeformForAttachments(SkeletonData& skeleton, const std::set<std::string>& bakedKeys) {
@@ -505,25 +554,56 @@ void bakeHighInfluenceMeshesFor3x(SkeletonData& skeleton) {
     }
 
     auto worlds = computeBoneWorlds(skeleton);
-    std::set<std::string> bakedKeys;
-    int baked = 0;
+    std::set<std::string> strippedKeys;
+    int collapsedMeshes = 0;
+    int collapsedVerts = 0;
+    int promotedMeshes = 0;
     for (auto& skin : skeleton.skins) {
         for (auto& [slotName, slotMap] : skin.attachments) {
+            auto slotIt = slotBoneIndex.find(slotName);
+            int fallbackBone = slotIt == slotBoneIndex.end() ? 0 : slotIt->second;
             for (auto& [attachmentName, attachment] : slotMap) {
                 if (attachment.type != AttachmentType_Mesh) continue;
                 auto& mesh = std::get<MeshAttachment>(attachment.data);
                 int vertexCount = static_cast<int>(mesh.uvs.size() / 2);
-                if (!isWeightedVertices(mesh.vertices, vertexCount)) continue;
-                auto slotIt = slotBoneIndex.find(slotName);
-                if (slotIt == slotBoneIndex.end()) continue;
-                bakeMeshToUnweighted(mesh, worlds[static_cast<size_t>(slotIt->second)], worlds);
-                bakedKeys.insert(skin.name + "\n" + slotName + "\n" + attachmentName);
-                baked++;
+                if (vertexCount <= 0) continue;
+                std::string key = skin.name + "\n" + slotName + "\n" + attachmentName;
+                if (!isWeightedVertices(mesh.vertices, vertexCount)) {
+                    if (mesh.vertices.size() < static_cast<size_t>(vertexCount) * 2) continue;
+                    std::vector<std::vector<BoneInfluence>> parsed(static_cast<size_t>(vertexCount));
+                    for (int v = 0; v < vertexCount; ++v) {
+                        BoneInfluence item;
+                        item.bone = fallbackBone;
+                        item.lx = mesh.vertices[static_cast<size_t>(v) * 2];
+                        item.ly = mesh.vertices[static_cast<size_t>(v) * 2 + 1];
+                        item.weight = 1.0f;
+                        parsed[static_cast<size_t>(v)].push_back(item);
+                    }
+                    writeWeightedVertices(parsed, mesh.vertices);
+                    promotedMeshes++;
+                    continue;
+                }
+                std::vector<std::vector<BoneInfluence>> parsed;
+                parseWeightedVertices(mesh.vertices, vertexCount, parsed);
+                bool changed = false;
+                for (auto& inf : parsed) {
+                    if (inf.size() <= 4) continue;
+                    collapseInfluencesFor3x(inf, worlds, fallbackBone);
+                    changed = true;
+                    collapsedVerts++;
+                }
+                if (changed) {
+                    writeWeightedVertices(parsed, mesh.vertices);
+                    strippedKeys.insert(key);
+                    collapsedMeshes++;
+                }
             }
         }
     }
-    stripDeformForAttachments(skeleton, bakedKeys);
-    std::cout << "Baked " << baked << " weighted meshes to unweighted setup verts for Spine 3.8 editor.\n";
+    stripDeformForAttachments(skeleton, strippedKeys);
+    std::cout << "Kept meshes weighted for 3.8 editor; collapsed " << collapsedVerts
+              << " verts on " << collapsedMeshes << " meshes to <=4 bones; promoted "
+              << promotedMeshes << " unweighted meshes to 1-bone weights.\n";
 }
 
 void sanitizeSkeletonDataFor3x(SkeletonData& skeleton) {
