@@ -458,7 +458,6 @@ std::vector<BoneWorld> computeBoneWorlds(const SkeletonData& skeleton) {
         }
         worlds[static_cast<size_t>(i)] = w;
     }
-    applySetupTransformConstraints(skeleton, worlds);
     return worlds;
 }
 
@@ -638,28 +637,57 @@ void stripDeformForAttachments(SkeletonData& skeleton, const std::set<std::strin
     }
 }
 
+bool isRemoteWeightHelperBone(const BoneData& bone) {
+    if (!bone.name) return false;
+    const std::string& name = *bone.name;
+    if (name == "hair51" || name == "role2" || name == "role3" || name == "role4") return true;
+    if (!bone.parent) return false;
+    // Duplicate role/hair anchors parented to role with a large setup translation.
+    // Do not treat real posed limbs (legL/legR, etc.) as helpers.
+    if (*bone.parent == "role" && name.rfind("role", 0) == 0 && std::hypot(bone.x, bone.y) > 400.0f) {
+        return true;
+    }
+    return false;
+}
+
 void bakeHighInfluenceMeshesFor3x(SkeletonData& skeleton) {
+    std::map<std::string, int> boneIndex;
+    for (int i = 0; i < static_cast<int>(skeleton.bones.size()); ++i) {
+        if (skeleton.bones[static_cast<size_t>(i)].name) {
+            boneIndex[*skeleton.bones[static_cast<size_t>(i)].name] = i;
+        }
+    }
+
     std::set<int> remoteHelpers;
     int fallbackBone = 0;
     for (int i = 0; i < static_cast<int>(skeleton.bones.size()); ++i) {
         const BoneData& bone = skeleton.bones[static_cast<size_t>(i)];
-        float dist = std::hypot(bone.x, bone.y);
-        bool parentIsAnchor = bone.parent && (*bone.parent == "role" || *bone.parent == "root" ||
-                                              *bone.parent == "camera" || *bone.parent == "bg");
-        if ((parentIsAnchor && dist > 400.0f) || dist > 800.0f) {
-            remoteHelpers.insert(i);
-        }
-        if (bone.name && (*bone.name == "face" || (*bone.name == "body" && fallbackBone == 0))) {
-            fallbackBone = i;
-        }
+        if (isRemoteWeightHelperBone(bone)) remoteHelpers.insert(i);
+        if (bone.name && *bone.name == "body") fallbackBone = i;
+        if (bone.name && *bone.name == "face") fallbackBone = i;
     }
+
+    std::map<std::string, int> slotBoneIndex;
+    for (const auto& slot : skeleton.slots) {
+        if (!slot.name || !slot.bone || !boneIndex.contains(*slot.bone)) continue;
+        slotBoneIndex[*slot.name] = boneIndex[*slot.bone];
+    }
+
+    const std::vector<BoneWorld> worlds = computeBoneWorlds(skeleton);
+    auto fallbackForSlot = [&](const std::string& slotName) {
+        auto it = slotBoneIndex.find(slotName);
+        if (it != slotBoneIndex.end() && !remoteHelpers.contains(it->second)) return it->second;
+        return fallbackBone;
+    };
 
     std::set<std::string> strippedKeys;
     int collapsedMeshes = 0;
     int collapsedVerts = 0;
     int droppedHelpers = 0;
+    int reboundVerts = 0;
     for (auto& skin : skeleton.skins) {
         for (auto& [slotName, slotMap] : skin.attachments) {
+            const int slotFallback = fallbackForSlot(slotName);
             for (auto& [attachmentName, attachment] : slotMap) {
                 if (attachment.type != AttachmentType_Mesh) continue;
                 auto& mesh = std::get<MeshAttachment>(attachment.data);
@@ -669,6 +697,9 @@ void bakeHighInfluenceMeshesFor3x(SkeletonData& skeleton) {
                 parseWeightedVertices(mesh.vertices, vertexCount, parsed);
                 bool changed = false;
                 for (auto& inf : parsed) {
+                    float wx = 0, wy = 0;
+                    skinWorld(inf, worlds, wx, wy);
+
                     std::vector<BoneInfluence> kept;
                     kept.reserve(inf.size());
                     for (const auto& item : inf) {
@@ -680,32 +711,39 @@ void bakeHighInfluenceMeshesFor3x(SkeletonData& skeleton) {
                         }
                         kept.push_back(item);
                     }
-                    bool vertexChanged = false;
-                    if (kept.empty()) {
-                        BoneInfluence one;
-                        one.bone = fallbackBone;
-                        one.weight = 1.0f;
-                        kept.push_back(one);
-                        vertexChanged = true;
-                    }
+                    bool vertexChanged = kept.size() != inf.size();
                     std::sort(kept.begin(), kept.end(), [](const BoneInfluence& a, const BoneInfluence& b) {
                         return a.weight > b.weight;
                     });
-                    if (kept.size() != inf.size()) vertexChanged = true;
                     if (static_cast<int>(kept.size()) > 4) {
                         kept.resize(4);
                         vertexChanged = true;
                         collapsedVerts++;
                     }
+                    if (kept.empty()) {
+                        BoneInfluence one;
+                        one.bone = slotFallback;
+                        one.weight = 1.0f;
+                        kept.push_back(one);
+                        vertexChanged = true;
+                    }
+                    if (!vertexChanged) continue;
+
                     float sum = 0;
                     for (const auto& item : kept) sum += item.weight;
-                    if (sum > 1e-8f) {
-                        for (auto& item : kept) item.weight /= sum;
+                    for (auto& item : kept) {
+                        if (item.bone < 0 || item.bone >= static_cast<int>(worlds.size())) {
+                            item.bone = slotFallback;
+                        }
+                        item.weight = sum > 1e-8f ? item.weight / sum : 1.0f / static_cast<float>(kept.size());
+                        // Keep the original skinned world position. Dropping helper
+                        // bones without this rebake left locals at 0,0 on face/body
+                        // and stretched hull triangles across the setup pose.
+                        worldToLocal(worlds[static_cast<size_t>(item.bone)], wx, wy, item.lx, item.ly);
                     }
-                    if (vertexChanged) {
-                        changed = true;
-                        inf.swap(kept);
-                    }
+                    inf.swap(kept);
+                    changed = true;
+                    reboundVerts++;
                 }
                 if (changed) {
                     writeWeightedVertices(parsed, mesh.vertices);
@@ -715,10 +753,24 @@ void bakeHighInfluenceMeshesFor3x(SkeletonData& skeleton) {
             }
         }
     }
+
+    int reboundSlots = 0;
+    for (auto& slot : skeleton.slots) {
+        if (!slot.bone || !boneIndex.contains(*slot.bone)) continue;
+        int bi = boneIndex[*slot.bone];
+        if (!remoteHelpers.contains(bi)) continue;
+        const BoneData& fallback = skeleton.bones[static_cast<size_t>(fallbackBone)];
+        if (!fallback.name) continue;
+        slot.bone = *fallback.name;
+        reboundSlots++;
+    }
+
     stripDeformForAttachments(skeleton, strippedKeys);
     std::cout << "Dropped remote helper bone weights (" << droppedHelpers
-              << " influences) and clamped " << collapsedVerts << " verts on "
-              << collapsedMeshes << " meshes to <=4 bones, keeping original locals.\n";
+              << " influences), clamped " << collapsedVerts << " verts on "
+              << collapsedMeshes << " meshes to <=4 bones, rebound " << reboundVerts
+              << " verts to preserve setup world positions, and reparented "
+              << reboundSlots << " helper slots.\n";
 }
 
 void sanitizeSkeletonDataFor3x(SkeletonData& skeleton) {
