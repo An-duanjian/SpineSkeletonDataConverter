@@ -14,6 +14,7 @@
 #include <spine/SkeletonJson.h>
 #include <spine/TextureLoader.h>
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <iostream>
@@ -110,8 +111,10 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
         spine::Animation *anim = runtimeData->findAnimation(animName);
         float duration = anim ? anim->getDuration() : 8.0f;
         if (duration < 1.0f) duration = 1.0f;
-        // One full clip plus extra Physics_Update steps so cloth/hair settle.
-        const int steps = static_cast<int>(std::ceil(duration / dt)) + 60;
+        // Two full loops of idle+physics, ending on the loop pose (t = 0 keys:
+        // standing bottle, rest hair) after physics has settled.
+        const int stepsPerLoop = std::max(1, static_cast<int>(std::lround(duration / dt)));
+        const int steps = stepsPerLoop * 2;
         for (int i = 0; i < steps; ++i) {
             state.update(dt);
             state.apply(skel);
