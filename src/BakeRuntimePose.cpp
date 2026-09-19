@@ -21,6 +21,7 @@
 #include <spine/VertexAttachment.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <filesystem>
 #include <iostream>
@@ -53,6 +54,33 @@ float wrapDeg(float degrees) {
 
 bool nearlyEqual(float a, float b, float eps = 0.0005f) {
     return std::fabs(a - b) <= eps;
+}
+
+std::string lowerCopy(const std::string &s) {
+    std::string out = s;
+    for (char &c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return out;
+}
+
+// 3.8 has no physics. Bake a settled rest pose into setup. Prefer a rest-named
+// clip when present; otherwise settle physics from authored setup only.
+spine::Animation *pickRestAnimation(spine::SkeletonData *data) {
+    if (!data) return nullptr;
+    auto &anims = data->getAnimations();
+    const char *kRest[] = {"idle", "stand", "rest", "wait", "default"};
+    for (const char *rest : kRest) {
+        for (size_t i = 0; i < anims.size(); ++i) {
+            if (!anims[i] || !anims[i]->getName().buffer()) continue;
+            if (lowerCopy(anims[i]->getName().buffer()) == rest) return anims[i];
+        }
+    }
+    return nullptr;
+}
+
+float farLocalThreshold(const SkeletonData &skeleton) {
+    float ref = std::max(std::fabs(skeleton.width), std::fabs(skeleton.height));
+    if (ref < 1.0f) ref = 1000.0f;
+    return std::max(250.0f, ref * 0.15f);
 }
 
 struct PoseDelta {
@@ -289,6 +317,11 @@ bool compactMinorityFarWeights(std::vector<float> &vertices, int vertexCount,
 }
 
 void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) {
+    // Generic 4.x → 3.8.75 Import Data:
+    // - 3.8 cannot simulate physics; settle world transforms into setup.
+    // - Import Data reapplies setup IK / mixX<0 transforms, so bake those
+    //   then zero the mixes. Mixes near 1 stay live for constraint animation.
+    // - Weighted deform length is 2 * influence count; do not drop influences.
     std::string atlasPath = findSiblingAtlas(inputFile);
     if (atlasPath.empty()) {
         std::cout << "Skipping physics rest bake: no sibling atlas for " << inputFile << "\n";
@@ -370,14 +403,11 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
         skel.setToSetupPose();
         spine::AnimationStateData stateData(runtimeData);
         spine::AnimationState state(&stateData);
-        const char *animName = runtimeData->findAnimation("idle") ? "idle" : nullptr;
-        if (animName) state.setAnimation(0, animName, true);
+        spine::Animation *restAnim = pickRestAnimation(runtimeData);
+        if (restAnim) state.setAnimation(0, restAnim, true);
         const float dt = 1.0f / 30.0f;
         float duration = 4.0f;
-        if (animName) {
-            spine::Animation *anim = runtimeData->findAnimation(animName);
-            if (anim && anim->getDuration() > 1.0f) duration = anim->getDuration();
-        }
+        if (restAnim && restAnim->getDuration() > 1.0f) duration = restAnim->getDuration();
         const int stepsPerLoop = std::max(1, static_cast<int>(std::lround(duration / dt)));
         skel.updateWorldTransform(spine::Physics_Reset);
         for (int i = 0; i < stepsPerLoop * 2; ++i) {
@@ -398,12 +428,13 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
             if (it != boneIndex.end()) physicsIdx.insert(it->second);
         }
 
+        const float farThresh = farLocalThreshold(skeleton);
         std::vector<char> farLocal(skeleton.bones.size(), 0);
         for (size_t i = 0; i < skeleton.bones.size(); ++i) {
             const BoneData &bone = skeleton.bones[i];
             if (!bone.parent || !bone.name) continue;
             if (physicsNames.contains(*bone.name) || liveConstraintBones.contains(*bone.name)) continue;
-            if (std::hypot(bone.x, bone.y) > 400.0f) farLocal[i] = 1;
+            if (std::hypot(bone.x, bone.y) > farThresh) farLocal[i] = 1;
         }
         std::map<std::pair<std::string, std::string>, std::vector<float>> worldVerts;
         std::set<std::pair<std::string, std::string>> rebindKeys;
@@ -581,9 +612,9 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
         }
     }
 
-    // Solved IK is already in baked locals. Zero setup IK mix so Import Data
-    // does not apply it again. mixX=-1 helpers are baked then disabled so they
-    // cannot invert the head a second time. tousheng-style mixes stay live.
+    // 3.8.75 Import Data reapplies setup IK/transform mixes. IK is already in
+    // baked locals, so setup mix must be 0. Negative translate mixes invert the
+    // baked helper and are disabled; mixes near 1 stay live for constraint clips.
     for (auto &ik : skeleton.ikConstraints) ik.mix = 0.0f;
     for (auto &tc : skeleton.transformConstraints) {
         if (tc.mixX < 0.0f || tc.mixY < 0.0f) {
@@ -596,8 +627,8 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
         }
     }
 
-    std::cout << "Baked idle+physics into 3.8 setup (transform subjects kept live): "
+    std::cout << "Baked physics rest into 3.8 setup (live transform subjects kept): "
               << bakedBones << " bones, " << rebakedMeshes << " meshes, "
-              << compactedMeshes << " helper-weight meshes.\n";
+              << compactedMeshes << " minority-far-weight meshes.\n";
     delete runtimeData;
 }

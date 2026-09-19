@@ -209,9 +209,8 @@ void normalizeMeshHullFor3x(SkeletonData& skeleton) {
                 auto& mesh = std::get<MeshAttachment>(attachment.data);
                 int vertexCount = static_cast<int>(mesh.uvs.size() / 2);
                 if (vertexCount <= 0 || mesh.hullLength <= 0) continue;
-                // 4.2 binary hull is the hull vertex count H (T = 2V - H - 2).
-                // 3.8.75 JSON hull is also H (the editor then does H << 1 internally).
-                // Do not halve: 2V-T-2 == H, not 2H. Halving collapsed jiu3/hair hulls.
+                // 4.2 binary hull is H (T = 2V - H - 2). 3.8.75 JSON hull is also
+                // H; the editor then does H << 1. Do not halve.
                 if (mesh.hullLength > vertexCount) {
                     mesh.hullLength = vertexCount;
                     clamped++;

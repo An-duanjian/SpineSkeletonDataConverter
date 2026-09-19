@@ -259,9 +259,9 @@ bool convertFile(const std::string& inputFile, const std::string& outputFile,
             } else {
                 fillMeshSizesFromAtlas(skelData, "");
             }
-            // 3.8.75 Import Data (ka.json hull<<1 / kR hull>=6, edges, atlas sizes).
-            // Bake idle+physics into setup, including IK-solved bones (then IK mix=0).
-            // Transform subjects such as tousheng stay live so those animations still run.
+            // 3.8.75 Import Data: hull is vertex count H (editor does H<<1),
+            // edges, atlas orig sizes, no physics. Bake a settled rest pose,
+            // keep high-mix transform subjects live, then match deform sizes.
             normalizeMeshHullFor3x(skelData);
             generateMissingMeshEdges(skelData);
             bakeHighInfluenceMeshesFor3x(skelData);
