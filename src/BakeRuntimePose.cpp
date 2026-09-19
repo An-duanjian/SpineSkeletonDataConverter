@@ -176,9 +176,9 @@ void writeWeightedVertices(const std::vector<std::vector<Influence>> &parsed,
     }
 }
 
-bool rebindVerticesToRuntimeBones(std::vector<float> &vertices, int vertexCount,
-                                  const std::vector<float> &world,
-                                  spine::Vector<spine::Bone *> &bones) {
+bool rebindVerticesToBoneWorlds(std::vector<float> &vertices, int vertexCount,
+                                const std::vector<float> &world,
+                                const std::vector<BoneWorld> &worlds) {
     if (!isWeighted(vertices, vertexCount)) return false;
     if (world.size() < static_cast<size_t>(vertexCount) * 2) return false;
     size_t i = 0;
@@ -192,9 +192,9 @@ bool rebindVerticesToRuntimeBones(std::vector<float> &vertices, int vertexCount,
         }
         for (int b = 0; b < boneCount && i + 3 < vertices.size(); ++b) {
             int boneIndex = static_cast<int>(std::lround(vertices[i]));
-            if (boneIndex >= 0 && boneIndex < static_cast<int>(bones.size()) && bones[boneIndex]) {
+            if (boneIndex >= 0 && boneIndex < static_cast<int>(worlds.size())) {
                 float nx = 0, ny = 0;
-                bones[boneIndex]->worldToLocal(wx, wy, nx, ny);
+                worldToLocal(worlds[static_cast<size_t>(boneIndex)], wx, wy, nx, ny);
                 if (std::isfinite(nx) && std::isfinite(ny) &&
                     std::fabs(nx) < 20000.0f && std::fabs(ny) < 20000.0f) {
                     vertices[i + 1] = nx;
@@ -207,32 +207,9 @@ bool rebindVerticesToRuntimeBones(std::vector<float> &vertices, int vertexCount,
     return true;
 }
 
-void applyWorldToInfluences(std::vector<Influence> &infs, float wx, float wy,
-                            spine::Vector<spine::Bone *> &bones) {
-    float sum = 0;
-    for (const auto &inf : infs) sum += inf.w;
-    if (sum <= 0.0f) {
-        for (auto &inf : infs) inf.w = infs.empty() ? 0.0f : 1.0f / static_cast<float>(infs.size());
-    } else {
-        for (auto &inf : infs) inf.w /= sum;
-    }
-    for (auto &inf : infs) {
-        if (inf.bone < 0 || inf.bone >= static_cast<int>(bones.size()) || !bones[inf.bone]) continue;
-        if (!std::isfinite(wx) || !std::isfinite(wy)) continue;
-        float nx = 0, ny = 0;
-        bones[inf.bone]->worldToLocal(wx, wy, nx, ny);
-        if (std::isfinite(nx) && std::isfinite(ny) &&
-            std::fabs(nx) < 20000.0f && std::fabs(ny) < 20000.0f) {
-            inf.x = nx;
-            inf.y = ny;
-        }
-    }
-}
-
-bool compactMinorityFarWeights(std::vector<float> &vertices, int vertexCount,
-                               std::vector<float> &world,
-                               const std::vector<char> &farLocal,
-                               spine::Vector<spine::Bone *> &bones) {
+bool snapMinorityFarVertices(std::vector<float> &vertices, int vertexCount,
+                             std::vector<float> &world,
+                             const std::vector<char> &farLocal) {
     std::vector<std::vector<Influence>> parsed;
     if (!parseWeightedVertices(vertices, vertexCount, parsed)) return false;
     if (world.size() < static_cast<size_t>(vertexCount) * 2) return false;
@@ -306,7 +283,6 @@ bool compactMinorityFarWeights(std::vector<float> &vertices, int vertexCount,
             infs[i].bone = donor[i % donor.size()].bone;
             infs[i].w = donor[i % donor.size()].w;
         }
-        applyWorldToInfluences(infs, wx, wy, bones);
         changed = true;
     }
     if (!changed) return false;
@@ -478,33 +454,6 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
             }
         }
 
-        auto &runtimeBones = skel.getBones();
-        for (auto &sk : skeleton.skins) {
-            for (auto &[slotName, attachments] : sk.attachments) {
-                for (auto &[attName, attachment] : attachments) {
-                    if (!rebindKeys.contains({slotName, attName})) continue;
-                    auto it = worldVerts.find({slotName, attName});
-                    if (it == worldVerts.end()) continue;
-                    auto [verts, vc] = weightedVerts(attachment);
-                    if (!verts || vc <= 0) continue;
-                    bool did = false;
-                    if (rebindKeys.contains({slotName, attName})) {
-                        did = rebindVerticesToRuntimeBones(*verts, vc, it->second, runtimeBones);
-                    }
-                    if (rebindKeys.contains({slotName, attName})) {
-                        int rounds = 0;
-                        while (rounds < 4 &&
-                               compactMinorityFarWeights(*verts, vc, it->second, farLocal, runtimeBones)) {
-                            compactedMeshes += (rounds == 0);
-                            did = true;
-                            rounds++;
-                        }
-                    }
-                    if (did) rebakedMeshes++;
-                }
-            }
-        }
-
         for (auto &bone : skeleton.bones) {
             if (!bone.name || liveConstraintBones.contains(*bone.name)) continue;
             spine::Bone *rb = skel.findBone(bone.name->c_str());
@@ -563,6 +512,28 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
                 bone.shearY = ashy;
             }
             bakedBones++;
+        }
+
+        // Mesh rest pose is captured in 4.2 world space. Project it onto the
+        // baked 3.8 setup bones so inherit (noRotation/noScale) still matches.
+        std::vector<BoneWorld> bakedWorlds = computeBoneWorlds(skeleton);
+        for (auto &sk : skeleton.skins) {
+            for (auto &[slotName, attachments] : sk.attachments) {
+                for (auto &[attName, attachment] : attachments) {
+                    if (!rebindKeys.contains({slotName, attName})) continue;
+                    auto it = worldVerts.find({slotName, attName});
+                    if (it == worldVerts.end()) continue;
+                    auto [verts, vc] = weightedVerts(attachment);
+                    if (!verts || vc <= 0) continue;
+                    int rounds = 0;
+                    while (rounds < 4 && snapMinorityFarVertices(*verts, vc, it->second, farLocal)) {
+                        compactedMeshes += (rounds == 0);
+                        rounds++;
+                    }
+                    if (rebindVerticesToBoneWorlds(*verts, vc, it->second, bakedWorlds))
+                        rebakedMeshes++;
+                }
+            }
         }
     }
 
