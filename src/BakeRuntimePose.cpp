@@ -1,5 +1,8 @@
 #include "SkeletonData.h"
 
+#include <spine/Animation.h>
+#include <spine/AnimationState.h>
+#include <spine/AnimationStateData.h>
 #include <spine/Atlas.h>
 #include <spine/Attachment.h>
 #include <spine/Bone.h>
@@ -200,9 +203,21 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
     {
         spine::Skeleton skel(runtimeData);
         skel.setToSetupPose();
+        spine::AnimationStateData stateData(runtimeData);
+        spine::AnimationState state(&stateData);
+        const char *animName = runtimeData->findAnimation("idle") ? "idle" : nullptr;
+        if (animName) state.setAnimation(0, animName, true);
         const float dt = 1.0f / 30.0f;
+        float duration = 4.0f;
+        if (animName) {
+            spine::Animation *anim = runtimeData->findAnimation(animName);
+            if (anim && anim->getDuration() > 1.0f) duration = anim->getDuration();
+        }
+        const int stepsPerLoop = std::max(1, static_cast<int>(std::lround(duration / dt)));
         skel.updateWorldTransform(spine::Physics_Reset);
-        for (int i = 0; i < 180; ++i) {
+        for (int i = 0; i < stepsPerLoop * 2; ++i) {
+            state.update(dt);
+            state.apply(skel);
             skel.update(dt);
             skel.updateWorldTransform(spine::Physics_Update);
         }
@@ -260,19 +275,10 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
                     if (!verts || vc <= 0) continue;
                     auto used = vertexBoneIndices(*verts, vc);
                     bool usesPhysics = false;
-                    bool usesLiveConstraint = false;
                     for (int idx : used) {
-                        if (physicsIdx.contains(idx)) usesPhysics = true;
-                        if (idx >= 0 && idx < static_cast<int>(skeleton.bones.size()) &&
-                            skeleton.bones[static_cast<size_t>(idx)].name &&
-                            liveConstraintBones.contains(*skeleton.bones[static_cast<size_t>(idx)].name)) {
-                            usesLiveConstraint = true;
-                        }
+                        if (physicsIdx.contains(idx)) { usesPhysics = true; break; }
                     }
-                    // Rebind physics cloth/hair, but skip meshes that also skin
-                    // live IK/transform bones (those mixes stay active in 3.8).
-                    if (usesPhysics && !usesLiveConstraint)
-                        rebindKeys.insert({slotName, attName});
+                    if (usesPhysics) rebindKeys.insert({slotName, attName});
                 }
             }
         }
