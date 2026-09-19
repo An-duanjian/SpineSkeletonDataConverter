@@ -216,6 +216,11 @@ void normalizeMeshHullFor3x(SkeletonData& skeleton) {
                     converted++;
                 }
                 if (mesh.hullLength > vertexCount) mesh.hullLength = vertexCount;
+                // Spine 3.8.75 Import Data: JSON hull is vertex count, then << 1.
+                // Internal hull must be >= 6, so JSON hull must be >= 3.
+                if (mesh.hullLength > 0 && mesh.hullLength < 3) {
+                    mesh.hullLength = vertexCount >= 3 ? vertexCount : 0;
+                }
             }
         }
     }
