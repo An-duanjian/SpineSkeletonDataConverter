@@ -622,6 +622,7 @@ void convertRotateTimeline3xTo4x(SkeletonData& skeleton);
 void convertRotateTimeline4xTo3x(SkeletonData& skeleton);
 void sanitizeSkeletonDataFor3x(SkeletonData& skeleton);
 void fillMeshSizesFromAtlas(SkeletonData& skeleton, const std::string& atlasPath);
+void generateMissingMeshEdges(SkeletonData& skeleton);
 std::string findSiblingAtlas(const std::string& inputFile);
 
 #endif // SKELETONDATA_H

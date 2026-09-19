@@ -1,5 +1,7 @@
 #include "SkeletonData.h"
 
+#include <cmath>
+
 namespace spine38 {
 
 void writeCurve(const TimelineFrame& frame, Json& j) {
@@ -36,11 +38,9 @@ Json writeJsonData(const SkeletonData& skeletonData) {
     skeleton["y"] = skeletonData.y;
     skeleton["width"] = skeletonData.width;
     skeleton["height"] = skeletonData.height;
-    if (skeletonData.nonessential) {
-        if (skeletonData.fps != 30.0f) skeleton["fps"] = skeletonData.fps;
-        if(skeletonData.imagesPath) skeleton["images"] = skeletonData.imagesPath;
-        if(skeletonData.audioPath) skeleton["audio"] = skeletonData.audioPath;
-    }
+    if (skeletonData.fps != 30.0f) skeleton["fps"] = skeletonData.fps;
+    if (skeletonData.imagesPath) skeleton["images"] = skeletonData.imagesPath;
+    if (skeletonData.audioPath) skeleton["audio"] = skeletonData.audioPath;
     j["skeleton"] = skeleton;
 
     /* Bones */
@@ -170,7 +170,27 @@ Json writeJsonData(const SkeletonData& skeletonData) {
                             if (!mesh.triangles.empty()) attachmentJson["triangles"] = mesh.triangles;
                             if (!mesh.edges.empty()) attachmentJson["edges"] = mesh.edges;
                             if (!mesh.uvs.empty()) attachmentJson["uvs"] = mesh.uvs;
-                            if (!mesh.vertices.empty()) attachmentJson["vertices"] = mesh.vertices;
+                            if (!mesh.vertices.empty()) {
+                                const bool weighted = mesh.vertices.size() != mesh.uvs.size();
+                                if (!weighted) {
+                                    attachmentJson["vertices"] = mesh.vertices;
+                                } else {
+                                    Json verts = Json::array();
+                                    size_t i = 0;
+                                    int expected = static_cast<int>(mesh.uvs.size() / 2);
+                                    for (int vi = 0; vi < expected && i < mesh.vertices.size(); ++vi) {
+                                        int boneCount = static_cast<int>(mesh.vertices[i++]);
+                                        verts.push_back(boneCount);
+                                        for (int b = 0; b < boneCount && i + 3 < mesh.vertices.size(); ++b) {
+                                            verts.push_back(static_cast<int>(std::lround(mesh.vertices[i++])));
+                                            verts.push_back(mesh.vertices[i++]);
+                                            verts.push_back(mesh.vertices[i++]);
+                                            verts.push_back(mesh.vertices[i++]);
+                                        }
+                                    }
+                                    attachmentJson["vertices"] = std::move(verts);
+                                }
+                            }
                             break;
                         }
                         case AttachmentType_Linkedmesh: {

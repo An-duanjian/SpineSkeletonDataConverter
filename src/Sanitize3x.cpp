@@ -199,8 +199,58 @@ void pruneEmptyTimelines(MultiTimeline& timelines) {
 
 }
 
+void generateMissingMeshEdges(SkeletonData& skeleton) {
+    int generated = 0;
+    for (auto& skin : skeleton.skins) {
+        for (auto& [slotName, slotMap] : skin.attachments) {
+            for (auto& [attachmentName, attachment] : slotMap) {
+                if (attachment.type != AttachmentType_Mesh) continue;
+                auto& mesh = std::get<MeshAttachment>(attachment.data);
+                if (!mesh.edges.empty()) continue;
+                int vertexCount = static_cast<int>(mesh.uvs.size() / 2);
+                if (vertexCount < 3) continue;
+
+                int hull = mesh.hullLength;
+                if (hull < 3 || hull > vertexCount) hull = vertexCount;
+
+                std::set<std::pair<int, int>> uniqueEdges;
+                auto addEdge = [&](int a, int b) {
+                    if (a == b) return;
+                    if (a > b) std::swap(a, b);
+                    uniqueEdges.emplace(a, b);
+                };
+
+                for (int i = 0; i < hull; ++i) {
+                    addEdge(i, (i + 1) % hull);
+                }
+                for (size_t i = 0; i + 2 < mesh.triangles.size(); i += 3) {
+                    int a = mesh.triangles[i];
+                    int b = mesh.triangles[i + 1];
+                    int c = mesh.triangles[i + 2];
+                    if (a >= vertexCount || b >= vertexCount || c >= vertexCount) continue;
+                    addEdge(a, b);
+                    addEdge(b, c);
+                    addEdge(c, a);
+                }
+
+                mesh.edges.reserve(uniqueEdges.size() * 2);
+                for (const auto& [a, b] : uniqueEdges) {
+                    mesh.edges.push_back(static_cast<unsigned short>(a * 2));
+                    mesh.edges.push_back(static_cast<unsigned short>(b * 2));
+                }
+                generated++;
+            }
+        }
+    }
+    std::cout << "Generated mesh edges for " << generated << " attachments (editor hull/internal edges).\n";
+}
+
 void sanitizeSkeletonDataFor3x(SkeletonData& skeleton) {
     skeleton.physicsConstraints.clear();
+    skeleton.nonessential = true;
+    if (!skeleton.imagesPath || skeleton.imagesPath->empty()) {
+        skeleton.imagesPath = "./images";
+    }
 
     bool hasDefaultSkin = false;
     for (auto& skin : skeleton.skins) {

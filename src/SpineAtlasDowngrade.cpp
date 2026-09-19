@@ -394,6 +394,117 @@ bool scaleImageWithStb(const fs::path& inputPath, const fs::path& outputPath, do
 	return stbi_write_png(outputPath.string().c_str(), outWidth, outHeight, channels, resized.data(), stride) != 0;
 }
 
+void rotatePackedRegionCCW90(const unsigned char* src, int packedW, int packedH, std::vector<unsigned char>& dst) {
+	dst.assign(static_cast<size_t>(packedH) * packedW * 4, 0);
+	for (int y = 0; y < packedH; ++y) {
+		for (int x = 0; x < packedW; ++x) {
+			int srcIndex = (y * packedW + x) * 4;
+			int dstX = y;
+			int dstY = packedW - 1 - x;
+			int dstIndex = (dstY * packedH + dstX) * 4;
+			dst[dstIndex] = src[srcIndex];
+			dst[dstIndex + 1] = src[srcIndex + 1];
+			dst[dstIndex + 2] = src[srcIndex + 2];
+			dst[dstIndex + 3] = src[srcIndex + 3];
+		}
+	}
+}
+
+bool unpackAtlasToImages(const AtlasData& atlas, const fs::path& textureDir, const fs::path& imagesDir) {
+	std::error_code ec;
+	fs::create_directories(imagesDir, ec);
+	if (ec) {
+		std::cout << "  [ERROR] Failed to create images directory: " << imagesDir.string() << std::endl;
+		return false;
+	}
+
+	std::cout << "Unpacking atlas regions for Spine editor images/:" << std::endl;
+	int written = 0;
+	bool overallSuccess = true;
+
+	for (const auto& page : atlas.pages) {
+		double scale = page.scale != 0.0 ? page.scale : 1.0;
+		fs::path pagePath = textureDir / page.name;
+		int pageWidth = 0, pageHeight = 0, channels = 0;
+		stbi_uc* pageData = stbi_load(pagePath.string().c_str(), &pageWidth, &pageHeight, &channels, STBI_rgb_alpha);
+		if (!pageData) {
+			std::cout << "  [ERROR] Cannot load page for unpack: " << pagePath.string() << std::endl;
+			overallSuccess = false;
+			continue;
+		}
+
+		for (const auto& region : page.regions) {
+			int x = roundScaled(region.x, scale);
+			int y = roundScaled(region.y, scale);
+			int sizeW = roundScaled(region.width, scale);
+			int sizeH = roundScaled(region.height, scale);
+			int origW = region.originalWidth > 0 ? roundScaled(region.originalWidth, scale) : sizeW;
+			int origH = region.originalHeight > 0 ? roundScaled(region.originalHeight, scale) : sizeH;
+			int offsetX = roundScaled(region.offsetX, scale);
+			int offsetY = roundScaled(region.offsetY, scale);
+
+			int packedW = sizeW;
+			int packedH = sizeH;
+			if (region.degrees == 90) {
+				packedW = sizeH;
+				packedH = sizeW;
+			}
+			if (packedW <= 0 || packedH <= 0 || origW <= 0 || origH <= 0) continue;
+			if (x < 0 || y < 0 || x + packedW > pageWidth || y + packedH > pageHeight) {
+				std::cout << "  [WARN] Region '" << region.name << "' exceeds page bounds, skipped." << std::endl;
+				overallSuccess = false;
+				continue;
+			}
+
+			std::vector<unsigned char> packed(static_cast<size_t>(packedW) * packedH * 4);
+			for (int row = 0; row < packedH; ++row) {
+				const unsigned char* src = pageData + ((y + row) * pageWidth + x) * 4;
+				unsigned char* dst = packed.data() + row * packedW * 4;
+				std::copy(src, src + packedW * 4, dst);
+			}
+
+			std::vector<unsigned char> unrotated;
+			int contentW = packedW;
+			int contentH = packedH;
+			if (region.degrees == 90) {
+				rotatePackedRegionCCW90(packed.data(), packedW, packedH, unrotated);
+				contentW = packedH;
+				contentH = packedW;
+			} else {
+				unrotated.swap(packed);
+			}
+
+			std::vector<unsigned char> canvas(static_cast<size_t>(origW) * origH * 4, 0);
+			int destX = std::max(0, std::min(offsetX, origW - 1));
+			int destY = origH - offsetY - contentH;
+			if (destY < 0) destY = 0;
+			for (int row = 0; row < contentH; ++row) {
+				int outY = destY + row;
+				if (outY < 0 || outY >= origH) continue;
+				int copyW = std::min(contentW, origW - destX);
+				if (copyW <= 0) continue;
+				const unsigned char* src = unrotated.data() + row * contentW * 4;
+				unsigned char* dst = canvas.data() + (outY * origW + destX) * 4;
+				std::copy(src, src + copyW * 4, dst);
+			}
+
+			fs::path outPath = imagesDir / (region.name + ".png");
+			fs::create_directories(outPath.parent_path(), ec);
+			if (!stbi_write_png(outPath.string().c_str(), origW, origH, 4, canvas.data(), origW * 4)) {
+				std::cout << "  [ERROR] Failed to write " << outPath.string() << std::endl;
+				overallSuccess = false;
+				continue;
+			}
+			written++;
+		}
+
+		stbi_image_free(pageData);
+	}
+
+	std::cout << "  [OK] Unpacked " << written << " images into " << imagesDir.string() << std::endl;
+	return overallSuccess;
+}
+
 bool scaleTextureImages(AtlasData& atlas, const fs::path& atlasDir, const fs::path& outputDir) {
 	std::cout << "Processing texture images:" << std::endl;
 	bool overallSuccess = true;
@@ -510,8 +621,10 @@ int main(int argc, char* argv[]) {
 	}
 	std::cout << "[OK] Atlas file converted: " << outputAtlasPath.string() << std::endl;
 
+	bool unpackSuccess = unpackAtlasToImages(atlasData, outputDir, outputDir / "images");
+
 	std::cout << "--------------------------------------------------" << std::endl;
-	if (textureSuccess) {
+	if (textureSuccess && unpackSuccess) {
 		std::cout << "Conversion completed." << std::endl;
 	} else {
 		std::cout << "Conversion completed with warnings." << std::endl;
