@@ -265,7 +265,6 @@ bool convertFile(const std::string& inputFile, const std::string& outputFile,
             // rewriting weights; keep high-mix transform subjects live.
             normalizeMeshHullFor3x(skelData);
             generateMissingMeshEdges(skelData);
-            bakeHighInfluenceMeshesFor3x(skelData);
             bakeRuntimePoseFor3x(skelData, inputFile);
             clampDeformTimelinesFor3x(skelData);
         }

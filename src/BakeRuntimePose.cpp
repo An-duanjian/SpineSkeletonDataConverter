@@ -4,7 +4,6 @@
 #include <spine/AnimationState.h>
 #include <spine/AnimationStateData.h>
 #include <spine/Atlas.h>
-#include <spine/Attachment.h>
 #include <spine/Bone.h>
 #include <spine/BoneData.h>
 #include <spine/Extension.h>
