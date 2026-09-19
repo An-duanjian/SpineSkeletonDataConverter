@@ -660,11 +660,30 @@ void bakeHighInfluenceMeshesFor3x(SkeletonData& skeleton) {
 
     std::set<int> remoteHelpers;
     int fallbackBone = 0;
+    int bodyBone = -1;
     for (int i = 0; i < static_cast<int>(skeleton.bones.size()); ++i) {
         const BoneData& bone = skeleton.bones[static_cast<size_t>(i)];
         if (isRemoteWeightHelperBone(bone)) remoteHelpers.insert(i);
-        if (bone.name && *bone.name == "body") fallbackBone = i;
+        if (bone.name && *bone.name == "body") {
+            fallbackBone = i;
+            bodyBone = i;
+        }
         if (bone.name && *bone.name == "face") fallbackBone = i;
+    }
+
+    // 4.2 physics origins sit far from the character so simulated hair can rest
+    // in the water. 3.8 has no physics, so pull those helper bones back to the
+    // body; child hair chains and weighted verts follow in setup.
+    int movedHelpers = 0;
+    if (bodyBone >= 0) {
+        const BoneData& body = skeleton.bones[static_cast<size_t>(bodyBone)];
+        for (int i : remoteHelpers) {
+            BoneData& helper = skeleton.bones[static_cast<size_t>(i)];
+            if (!helper.parent || !body.parent || *helper.parent != *body.parent) continue;
+            helper.x = body.x;
+            helper.y = body.y;
+            movedHelpers++;
+        }
     }
 
     std::map<std::string, int> slotBoneIndex;
@@ -766,10 +785,11 @@ void bakeHighInfluenceMeshesFor3x(SkeletonData& skeleton) {
     }
 
     stripDeformForAttachments(skeleton, strippedKeys);
-    std::cout << "Dropped remote helper bone weights (" << droppedHelpers
-              << " influences), clamped " << collapsedVerts << " verts on "
-              << collapsedMeshes << " meshes to <=4 bones, rebound " << reboundVerts
-              << " verts to preserve setup world positions, and reparented "
+    std::cout << "Moved " << movedHelpers
+              << " physics helper bones to the body, dropped remote helper weights ("
+              << droppedHelpers << " influences), clamped " << collapsedVerts
+              << " verts on " << collapsedMeshes << " meshes to <=4 bones, rebound "
+              << reboundVerts << " verts to preserve setup world positions, and reparented "
               << reboundSlots << " helper slots.\n";
 }
 
