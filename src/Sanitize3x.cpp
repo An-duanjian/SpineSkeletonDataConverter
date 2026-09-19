@@ -245,6 +245,92 @@ void generateMissingMeshEdges(SkeletonData& skeleton) {
     std::cout << "Generated mesh edges for " << generated << " attachments (editor hull/internal edges).\n";
 }
 
+bool isWeightedVertices(const std::vector<float>& vertices, int vertexCount) {
+    return vertexCount > 0 && vertices.size() != static_cast<size_t>(vertexCount * 2);
+}
+
+void limitVertexInfluences(std::vector<float>& vertices, int vertexCount, int maxBones) {
+    if (!isWeightedVertices(vertices, vertexCount) || maxBones < 1) return;
+
+    struct Influence {
+        int bone = 0;
+        float x = 0, y = 0, w = 0;
+    };
+
+    std::vector<float> out;
+    out.reserve(vertices.size());
+    size_t i = 0;
+    for (int v = 0; v < vertexCount && i < vertices.size(); ++v) {
+        int boneCount = static_cast<int>(vertices[i++]);
+        std::vector<Influence> influences;
+        influences.reserve(std::max(boneCount, 0));
+        for (int b = 0; b < boneCount && i + 3 < vertices.size(); ++b) {
+            Influence inf;
+            inf.bone = static_cast<int>(std::lround(vertices[i++]));
+            inf.x = vertices[i++];
+            inf.y = vertices[i++];
+            inf.w = vertices[i++];
+            influences.push_back(inf);
+        }
+        if (static_cast<int>(influences.size()) > maxBones) {
+            std::partial_sort(influences.begin(), influences.begin() + maxBones, influences.end(),
+                              [](const Influence& a, const Influence& b) { return a.w > b.w; });
+            influences.resize(static_cast<size_t>(maxBones));
+        }
+        float sum = 0.0f;
+        for (const auto& inf : influences) sum += inf.w;
+        if (sum > 0.0f) {
+            for (auto& inf : influences) inf.w /= sum;
+        }
+        out.push_back(static_cast<float>(influences.size()));
+        for (const auto& inf : influences) {
+            out.push_back(static_cast<float>(inf.bone));
+            out.push_back(inf.x);
+            out.push_back(inf.y);
+            out.push_back(inf.w);
+        }
+    }
+    vertices.swap(out);
+}
+
+void limitWeightedInfluencesFor3x(SkeletonData& skeleton) {
+    constexpr int kMaxBones = 4;
+    int clamped = 0;
+    for (auto& skin : skeleton.skins) {
+        for (auto& [slotName, slotMap] : skin.attachments) {
+            for (auto& [attachmentName, attachment] : slotMap) {
+                if (attachment.type == AttachmentType_Mesh) {
+                    auto& mesh = std::get<MeshAttachment>(attachment.data);
+                    int vertexCount = static_cast<int>(mesh.uvs.size() / 2);
+                    if (!isWeightedVertices(mesh.vertices, vertexCount)) continue;
+                    size_t before = mesh.vertices.size();
+                    limitVertexInfluences(mesh.vertices, vertexCount, kMaxBones);
+                    if (mesh.vertices.size() != before) clamped++;
+                } else if (attachment.type == AttachmentType_Path) {
+                    auto& path = std::get<PathAttachment>(attachment.data);
+                    if (!isWeightedVertices(path.vertices, path.vertexCount)) continue;
+                    size_t before = path.vertices.size();
+                    limitVertexInfluences(path.vertices, path.vertexCount, kMaxBones);
+                    if (path.vertices.size() != before) clamped++;
+                } else if (attachment.type == AttachmentType_Clipping) {
+                    auto& clipping = std::get<ClippingAttachment>(attachment.data);
+                    if (!isWeightedVertices(clipping.vertices, clipping.vertexCount)) continue;
+                    size_t before = clipping.vertices.size();
+                    limitVertexInfluences(clipping.vertices, clipping.vertexCount, kMaxBones);
+                    if (clipping.vertices.size() != before) clamped++;
+                } else if (attachment.type == AttachmentType_Boundingbox) {
+                    auto& box = std::get<BoundingboxAttachment>(attachment.data);
+                    if (!isWeightedVertices(box.vertices, box.vertexCount)) continue;
+                    size_t before = box.vertices.size();
+                    limitVertexInfluences(box.vertices, box.vertexCount, kMaxBones);
+                    if (box.vertices.size() != before) clamped++;
+                }
+            }
+        }
+    }
+    std::cout << "Limited weighted vertices to " << kMaxBones << " bones for " << clamped << " attachments (Spine 3.8 editor).\n";
+}
+
 void sanitizeSkeletonDataFor3x(SkeletonData& skeleton) {
     skeleton.physicsConstraints.clear();
     skeleton.nonessential = true;

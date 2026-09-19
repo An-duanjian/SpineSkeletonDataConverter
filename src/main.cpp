@@ -260,6 +260,7 @@ bool convertFile(const std::string& inputFile, const std::string& outputFile,
                 fillMeshSizesFromAtlas(skelData, "");
             }
             generateMissingMeshEdges(skelData);
+            limitWeightedInfluencesFor3x(skelData);
         }
         
         // Write data using output version
