@@ -249,6 +249,11 @@ bool convertFile(const std::string& inputFile, const std::string& outputFile,
             std::cout << "Converting from 4.2 to below 4.2, adjusting constraint order...\n"; 
             convertOrder42ToBelow(skelData);
         }
+        if (aboveOrEqualVersion(inputVersion, SpineVersion::Version40) &&
+            belowOrEqualVersion(outputVersion, SpineVersion::Version38)) {
+            std::cout << "Sanitizing skeleton data for Spine 3.x editor import...\n";
+            sanitizeSkeletonDataFor3x(skelData);
+        }
         
         // Write data using output version
         switch (outputVersion) {

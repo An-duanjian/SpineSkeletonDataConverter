@@ -40,10 +40,10 @@ void writeVertices(Binary& binary, const std::vector<float>& vertices, bool weig
 void writeCurve(Binary& binary, const TimelineFrame& frame) {
     writeByte(binary, (unsigned char)frame.curveType);
     if (frame.curveType == CurveType::CURVE_BEZIER) {
-        writeFloat(binary, frame.curve[0]);
-        writeFloat(binary, frame.curve[1]);
-        writeFloat(binary, frame.curve[2]);
-        writeFloat(binary, frame.curve[3]);
+        writeFloat(binary, frame.curve.size() > 0 ? frame.curve[0] : 0.0f);
+        writeFloat(binary, frame.curve.size() > 1 ? frame.curve[1] : 0.0f);
+        writeFloat(binary, frame.curve.size() > 2 ? frame.curve[2] : 1.0f);
+        writeFloat(binary, frame.curve.size() > 3 ? frame.curve[3] : 1.0f);
     }
 }
 
@@ -230,9 +230,29 @@ void writeSkin(Binary& binary, const Skin& skin, const SkeletonData& skeletonDat
 }
 
 void writeAnimation(Binary& binary, const Animation& animation, const SkeletonData& skeletonData) {
-    writeString(binary, animation.name); 
-    writeVarint(binary, animation.slots.size(), true);
+    writeString(binary, animation.name);
+
+    int slotCount = 0;
     for (const auto& [slotName, multiTimeline] : animation.slots) {
+        for (const auto& [timelineName, timeline] : multiTimeline) {
+            if (timeline.empty()) continue;
+            SlotTimelineType timelineType = slotTimelineTypeMap.at(timelineName);
+            if (timelineType != SlotTimelineType::SLOT_ALPHA) {
+                slotCount++;
+                break;
+            }
+        }
+    }
+    writeVarint(binary, slotCount, true);
+    for (const auto& [slotName, multiTimeline] : animation.slots) {
+        int timelineCount = 0;
+        for (const auto& [timelineName, timeline] : multiTimeline) {
+            if (timeline.empty()) continue;
+            SlotTimelineType timelineType = slotTimelineTypeMap.at(timelineName);
+            if (timelineType != SlotTimelineType::SLOT_ALPHA) timelineCount++;
+        }
+        if (timelineCount == 0) continue;
+
         int slotIndex = 0; 
         for (size_t i = 0; i < skeletonData.slots.size(); i++) {
             if (skeletonData.slots[i].name && *skeletonData.slots[i].name == slotName) {
@@ -241,13 +261,9 @@ void writeAnimation(Binary& binary, const Animation& animation, const SkeletonDa
             }
         }
         writeVarint(binary, slotIndex, true);
-        int timelineCount = 0;
-        for (const auto& [timelineName, timeline] : multiTimeline) {
-            SlotTimelineType timelineType = slotTimelineTypeMap.at(timelineName);
-            if (timelineType != SlotTimelineType::SLOT_ALPHA) timelineCount++;
-        }
         writeVarint(binary, timelineCount, true);
         for (const auto& [timelineName, timeline] : multiTimeline) {
+            if (timeline.empty()) continue;
             SlotTimelineType timelineType = slotTimelineTypeMap.at(timelineName);
             if (timelineType == SlotTimelineType::SLOT_ALPHA) continue;
             switch (timelineType) {
@@ -297,8 +313,28 @@ void writeAnimation(Binary& binary, const Animation& animation, const SkeletonDa
             }
         }
     }
-    writeVarint(binary, animation.bones.size(), true);
+
+    int boneCount = 0;
     for (const auto& [boneName, multiTimeline] : animation.bones) {
+        for (const auto& [timelineName, timeline] : multiTimeline) {
+            if (timeline.empty()) continue;
+            BoneTimelineType timelineType = boneTimelineTypeMap.at(timelineName);
+            if (timelineType != BONE_INHERIT) {
+                boneCount++;
+                break;
+            }
+        }
+    }
+    writeVarint(binary, boneCount, true);
+    for (const auto& [boneName, multiTimeline] : animation.bones) {
+        int timelineCount = 0;
+        for (const auto& [timelineName, timeline] : multiTimeline) {
+            if (timeline.empty()) continue;
+            BoneTimelineType timelineType = boneTimelineTypeMap.at(timelineName);
+            if (timelineType != BONE_INHERIT) timelineCount++;
+        }
+        if (timelineCount == 0) continue;
+
         int boneIndex = 0; 
         for (size_t i = 0; i < skeletonData.bones.size(); i++) {
             if (skeletonData.bones[i].name && *skeletonData.bones[i].name == boneName) {
@@ -307,8 +343,9 @@ void writeAnimation(Binary& binary, const Animation& animation, const SkeletonDa
             }
         }
         writeVarint(binary, boneIndex, true);
-        writeVarint(binary, multiTimeline.size(), true);
+        writeVarint(binary, timelineCount, true);
         for (const auto& [timelineName, timeline] : multiTimeline) {
+            if (timeline.empty()) continue;
             BoneTimelineType timelineType = boneTimelineTypeMap.at(timelineName);
             if (timelineType == BONE_INHERIT) continue;
             switch (timelineType) {
@@ -437,8 +474,32 @@ void writeAnimation(Binary& binary, const Animation& animation, const SkeletonDa
             }
         }
     }
-    writeVarint(binary, animation.attachments.size(), true); 
+    int deformSkinCount = 0;
     for (const auto& [skinName, skinMap] : animation.attachments) {
+        bool skinHasDeform = false;
+        for (const auto& [slotName, slotMap] : skinMap) {
+            for (const auto& [attachmentName, multiTimeline] : slotMap) {
+                if (multiTimeline.contains("deform") && !multiTimeline.at("deform").empty()) {
+                    skinHasDeform = true;
+                    break;
+                }
+            }
+            if (skinHasDeform) break;
+        }
+        if (skinHasDeform) deformSkinCount++;
+    }
+    writeVarint(binary, deformSkinCount, true); 
+    for (const auto& [skinName, skinMap] : animation.attachments) {
+        int slotCount = 0;
+        for (const auto& [slotName, slotMap] : skinMap) {
+            int attachmentCount = 0;
+            for (const auto& [attachmentName, multiTimeline] : slotMap) {
+                if (multiTimeline.contains("deform") && !multiTimeline.at("deform").empty()) attachmentCount++;
+            }
+            if (attachmentCount > 0) slotCount++;
+        }
+        if (slotCount == 0) continue;
+
         int skinIndex = 0;
         for (size_t i = 0; i < skeletonData.skins.size(); i++) {
             if (skeletonData.skins[i].name == skinName) {
@@ -447,8 +508,14 @@ void writeAnimation(Binary& binary, const Animation& animation, const SkeletonDa
             }
         }
         writeVarint(binary, skinIndex, true);
-        writeVarint(binary, skinMap.size(), true);
+        writeVarint(binary, slotCount, true);
         for (const auto& [slotName, slotMap] : skinMap) {
+            int attachmentCount = 0;
+            for (const auto& [attachmentName, multiTimeline] : slotMap) {
+                if (multiTimeline.contains("deform") && !multiTimeline.at("deform").empty()) attachmentCount++;
+            }
+            if (attachmentCount == 0) continue;
+
             int slotIndex = 0; 
             for (size_t i = 0; i < skeletonData.slots.size(); i++) {
                 if (skeletonData.slots[i].name && *skeletonData.slots[i].name == slotName) {
@@ -457,9 +524,9 @@ void writeAnimation(Binary& binary, const Animation& animation, const SkeletonDa
                 }
             }
             writeVarint(binary, slotIndex, true);
-            writeVarint(binary, slotMap.size(), true);
+            writeVarint(binary, attachmentCount, true);
             for (const auto& [attachmentName, multiTimeline] : slotMap) {
-                if (!multiTimeline.contains("deform")) continue;
+                if (!multiTimeline.contains("deform") || multiTimeline.at("deform").empty()) continue;
                 const auto& timeline = multiTimeline.at("deform");
                 writeStringRef(binary, attachmentName, skeletonData); 
                 writeVarint(binary, timeline.size(), true);

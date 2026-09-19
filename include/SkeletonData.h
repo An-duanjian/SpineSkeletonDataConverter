@@ -620,5 +620,6 @@ void convertOrder42ToBelow(SkeletonData& skeleton);
 void convertSpacingMode4xTo3x(SkeletonData& skeleton);
 void convertRotateTimeline3xTo4x(SkeletonData& skeleton);
 void convertRotateTimeline4xTo3x(SkeletonData& skeleton);
+void sanitizeSkeletonDataFor3x(SkeletonData& skeleton);
 
 #endif // SKELETONDATA_H

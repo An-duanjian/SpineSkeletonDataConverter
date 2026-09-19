@@ -39,6 +39,7 @@ add_executable(SpineSkeletonDataConverter
     "src/CurveConverter.cpp"
     "src/OrderConverter.cpp"
     "src/RotateTimelineConverter.cpp"
+    "src/Sanitize3x.cpp"
     "src/SpacingModeConverter.cpp"
     "src/SkeletonData35BinaryReader.cpp"
     "src/SkeletonData35BinaryWriter.cpp"

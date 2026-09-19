@@ -6,6 +6,7 @@ void writeCurve(const TimelineFrame& frame, Json& j) {
     if (frame.curveType == CurveType::CURVE_STEPPED) {
         j["curve"] = "stepped";
     } else if (frame.curveType == CurveType::CURVE_BEZIER) {
+        if (frame.curve.size() < 4) return;
         if (!frame.curve.empty()) j["curve"] = frame.curve[0];
         if (frame.curve[1] != 0.0f) j["c2"] = frame.curve[1];
         if (frame.curve[2] != 1.0f) j["c3"] = frame.curve[2];
@@ -271,7 +272,7 @@ Json writeJsonData(const SkeletonData& skeletonData) {
                         slotJson["twoColor"].push_back(frameJson);
                     }
                 }
-                animationJson["slots"][slotName] = slotJson;
+                if (!slotJson.empty()) animationJson["slots"][slotName] = slotJson;
             }
         }
         if (!animation.bones.empty()) {
@@ -289,7 +290,7 @@ Json writeJsonData(const SkeletonData& skeletonData) {
                 if (boneMap.contains("shear")) {
                     writeTimeline(boneMap.at("shear"), boneJson["shear"], 2, "x", "y", 0.0f);
                 }
-                animationJson["bones"][boneName] = boneJson;
+                if (!boneJson.empty()) animationJson["bones"][boneName] = boneJson;
             }
         }
         if (!animation.ik.empty()) {
