@@ -299,7 +299,7 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
         }
 
         for (auto &bone : skeleton.bones) {
-            if (!bone.name || !physicsNames.contains(*bone.name)) continue;
+            if (!bone.name || liveConstraintBones.contains(*bone.name)) continue;
             spine::Bone *rb = skel.findBone(bone.name->c_str());
             if (!rb) continue;
 
@@ -317,10 +317,15 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
             }
             if (std::fabs(ax) > 20000.0f || std::fabs(ay) > 20000.0f) continue;
 
+            float drot = wrapDeg(arot - bone.rotation);
+            const bool rotationUnreliable = std::fabs(drot) > 90.0f &&
+                                            bone.inherit != Inherit_Normal;
+            if (rotationUnreliable) drot = 0.0f;
+
             PoseDelta d;
             d.dx = ax - bone.x;
             d.dy = ay - bone.y;
-            d.drot = wrapDeg(arot - bone.rotation);
+            d.drot = drot;
             d.oldScaleX = bone.scaleX;
             d.oldScaleY = bone.scaleY;
             d.newScaleX = asx != 0.0f ? asx : bone.scaleX;
@@ -337,7 +342,7 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
             deltas[*bone.name] = d;
             bone.x = ax;
             bone.y = ay;
-            bone.rotation = wrapDeg(arot);
+            if (!rotationUnreliable) bone.rotation = wrapDeg(arot);
             if (asx != 0.0f) bone.scaleX = asx;
             if (asy != 0.0f) bone.scaleY = asy;
             bone.shearX = ashx;
@@ -377,7 +382,7 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
         }
     }
 
-    std::cout << "Baked 4.x setup+physics rest into 3.8 (IK/transform mixes kept): "
-              << bakedBones << " physics bones, " << rebakedMeshes << " meshes.\n";
+    std::cout << "Baked idle+physics into 3.8 setup (IK/transform subjects kept live): "
+              << bakedBones << " bones, " << rebakedMeshes << " meshes.\n";
     delete runtimeData;
 }

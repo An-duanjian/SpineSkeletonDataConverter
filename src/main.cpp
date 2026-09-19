@@ -260,8 +260,8 @@ bool convertFile(const std::string& inputFile, const std::string& outputFile,
                 fillMeshSizesFromAtlas(skelData, "");
             }
             // 3.8.75 Import Data (ka.json hull<<1 / kR hull>=6, edges, atlas sizes).
-            // Bake setup+physics rest into physics bones only so hair is not 错位.
-            // Keep IK/transform mixes and non-physics keys so tousheng etc. still animate.
+            // Bake idle+physics into setup for head/petals/hair, but do not bake
+            // IK/transform subjects (tousheng, mixX=-1 helpers) so animations stay live.
             normalizeMeshHullFor3x(skelData);
             generateMissingMeshEdges(skelData);
             bakeHighInfluenceMeshesFor3x(skelData);
