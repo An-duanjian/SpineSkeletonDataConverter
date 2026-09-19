@@ -1,23 +1,25 @@
 #include "SkeletonData.h"
 
 #include <spine/Animation.h>
-#include <spine/Attachment.h>
 #include <spine/AnimationState.h>
 #include <spine/AnimationStateData.h>
 #include <spine/Atlas.h>
+#include <spine/Attachment.h>
 #include <spine/Bone.h>
 #include <spine/BoneData.h>
 #include <spine/Extension.h>
+#include <spine/IkConstraintData.h>
 #include <spine/Physics.h>
 #include <spine/Skeleton.h>
 #include <spine/SkeletonBinary.h>
 #include <spine/SkeletonData.h>
 #include <spine/SkeletonJson.h>
-#include <spine/IkConstraintData.h>
-#include <spine/PathConstraintData.h>
-#include <spine/PhysicsConstraintData.h>
-#include <spine/TransformConstraintData.h>
+#include <spine/Skin.h>
+#include <spine/Slot.h>
+#include <spine/SlotData.h>
 #include <spine/TextureLoader.h>
+#include <spine/TransformConstraintData.h>
+#include <spine/VertexAttachment.h>
 
 #include <cmath>
 #include <filesystem>
@@ -25,6 +27,8 @@
 #include <map>
 #include <set>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace spine {
 SpineExtension *getDefaultExtension() {
@@ -62,22 +66,37 @@ const char *pickPoseAnimation(spine::SkeletonData *data) {
     return nullptr;
 }
 
-bool isLiveConstraintSubject(const std::string &name,
-                             const std::set<std::string> &ikSubjects,
-                             const std::set<std::string> &transformSubjects) {
-    // Live 3.8 IK/transform subjects must keep their authored setup. Baking
-    // their constrained locals and then letting the constraint run again in
-    // the editor double-applies (face14 / body13 jumped hundreds of px).
-    // This includes physics bones that are also constraint subjects
-    // (tousheng, hair_b): physics is stripped, but the transform still runs.
-    return ikSubjects.contains(name) || transformSubjects.contains(name);
+bool isWeighted(const std::vector<float> &vertices, int vertexCount) {
+    return vertexCount > 0 && vertices.size() != static_cast<size_t>(vertexCount) * 2;
+}
+
+void stripDeform(SkeletonData &skeleton, const std::set<std::pair<std::string, std::string>> &slotAtt) {
+    if (slotAtt.empty()) return;
+    for (auto &animation : skeleton.animations) {
+        for (auto skinIt = animation.attachments.begin(); skinIt != animation.attachments.end();) {
+            for (auto slotIt = skinIt->second.begin(); slotIt != skinIt->second.end();) {
+                for (auto attIt = slotIt->second.begin(); attIt != slotIt->second.end();) {
+                    if (slotAtt.contains({slotIt->first, attIt->first})) attIt = slotIt->second.erase(attIt);
+                    else ++attIt;
+                }
+                if (slotIt->second.empty()) slotIt = skinIt->second.erase(slotIt);
+                else ++slotIt;
+            }
+            if (skinIt->second.empty()) skinIt = animation.attachments.erase(skinIt);
+            else ++skinIt;
+        }
+    }
+}
+
+int meshVertexCount(const MeshAttachment &mesh) {
+    if (!mesh.uvs.empty()) return static_cast<int>(mesh.uvs.size() / 2);
+    if (mesh.hullLength > 0) return mesh.hullLength;
+    return static_cast<int>(mesh.vertices.size() / 2);
 }
 
 }
 
 void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) {
-    namespace fs = std::filesystem;
-    fs::path input(inputFile);
     std::string atlasPath = findSiblingAtlas(inputFile);
     if (atlasPath.empty()) {
         std::cout << "Skipping 4.x runtime pose bake: no sibling atlas for " << inputFile << "\n";
@@ -92,6 +111,7 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
     }
 
     spine::SkeletonData *runtimeData = nullptr;
+    std::filesystem::path input(inputFile);
     std::string ext = input.extension().string();
     if (ext == ".skel") {
         spine::SkeletonBinary binary(&atlas);
@@ -115,36 +135,10 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
         return;
     }
 
-    std::set<std::string> physicsBones;
-    std::set<std::string> ikSubjects;
-    std::set<std::string> transformSubjects;
-    auto addNamed = [](std::set<std::string> &into, spine::BoneData *data) {
-        if (data && data->getName().length() > 0) into.insert(data->getName().buffer());
-    };
-    for (size_t i = 0; i < runtimeData->getPhysicsConstraints().size(); ++i) {
-        addNamed(physicsBones, runtimeData->getPhysicsConstraints()[i]->getBone());
-    }
-    for (size_t i = 0; i < runtimeData->getIkConstraints().size(); ++i) {
-        auto *ik = runtimeData->getIkConstraints()[i];
-        if (std::fabs(ik->getMix()) < 1e-4f) continue;
-        for (size_t b = 0; b < ik->getBones().size(); ++b) addNamed(ikSubjects, ik->getBones()[b]);
-    }
-    for (size_t i = 0; i < runtimeData->getTransformConstraints().size(); ++i) {
-        auto *tc = runtimeData->getTransformConstraints()[i];
-        if (std::fabs(tc->getMixRotate()) < 1e-4f &&
-            std::fabs(tc->getMixX()) < 1e-4f &&
-            std::fabs(tc->getMixY()) < 1e-4f &&
-            std::fabs(tc->getMixScaleX()) < 1e-4f &&
-            std::fabs(tc->getMixScaleY()) < 1e-4f &&
-            std::fabs(tc->getMixShearY()) < 1e-4f) {
-            continue;
-        }
-        for (size_t b = 0; b < tc->getBones().size(); ++b) addNamed(transformSubjects, tc->getBones()[b]);
-    }
-
-    int baked = 0;
-    int skippedLive = 0;
+    int bakedBones = 0;
+    int rebakedMeshes = 0;
     std::map<std::string, PoseDelta> deltas;
+    std::set<std::pair<std::string, std::string>> rebaked;
     {
         spine::Skeleton skel(runtimeData);
         skel.setToSetupPose();
@@ -153,23 +147,50 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
         state.setAnimation(0, animName, true);
 
         const float dt = 1.0f / 30.0f;
-        const int frames = 240;
-        for (int i = 0; i < frames; ++i) {
+        for (int i = 0; i < 240; ++i) {
             state.update(dt);
             state.apply(skel);
             skel.update(dt);
             skel.updateWorldTransform(spine::Physics_Update);
         }
 
+        std::map<std::pair<std::string, std::string>, std::vector<float>> worldVerts;
+        spine::Skin *skin = skel.getSkin();
+        if (!skin) skin = runtimeData->getDefaultSkin();
+        if (skin) {
+            auto entries = skin->getAttachments();
+            while (entries.hasNext()) {
+                auto &entry = entries.next();
+                if (!entry._attachment ||
+                    !entry._attachment->getRTTI().instanceOf(spine::VertexAttachment::rtti)) {
+                    continue;
+                }
+                auto *va = static_cast<spine::VertexAttachment *>(entry._attachment);
+                if (va->getBones().size() == 0 || va->getWorldVerticesLength() < 2) continue;
+                if (entry._slotIndex >= skel.getSlots().size()) continue;
+                spine::Slot *slot = skel.getSlots()[entry._slotIndex];
+                spine::Attachment *saved = slot->getAttachment();
+                slot->setAttachment(entry._attachment);
+                spine::Vector<float> world;
+                world.setSize(va->getWorldVerticesLength(), 0);
+                va->computeWorldVertices(*slot, 0, va->getWorldVerticesLength(), world, 0, 2);
+                slot->setAttachment(saved);
+
+                std::string slotName = slot->getData().getName().buffer();
+                std::string attName = entry._name.buffer();
+                std::vector<float> out(world.size());
+                bool ok = true;
+                for (size_t i = 0; i < world.size(); ++i) {
+                    if (!std::isfinite(world[i])) { ok = false; break; }
+                    out[i] = world[i];
+                }
+                if (ok) worldVerts[{slotName, attName}] = std::move(out);
+            }
+        }
+
         for (auto &bone : skeleton.bones) {
             if (!bone.name) continue;
-            const std::string &name = *bone.name;
-            if (!physicsBones.contains(name)) continue;
-            if (isLiveConstraintSubject(name, ikSubjects, transformSubjects)) {
-                skippedLive++;
-                continue;
-            }
-            spine::Bone *rb = skel.findBone(name.c_str());
+            spine::Bone *rb = skel.findBone(bone.name->c_str());
             if (!rb) continue;
 
             const float ax = rb->getAX();
@@ -184,20 +205,11 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
                 !std::isfinite(ashx) || !std::isfinite(ashy)) {
                 continue;
             }
-            if (std::fabs(ax) > 8000.0f || std::fabs(ay) > 8000.0f) continue;
-
-            if (nearlyEqual(ax, bone.x) && nearlyEqual(ay, bone.y) &&
-                nearlyEqual(wrapDeg(arot - bone.rotation), 0.0f) &&
-                nearlyEqual(asx, bone.scaleX) && nearlyEqual(asy, bone.scaleY) &&
-                nearlyEqual(ashx, bone.shearX) && nearlyEqual(ashy, bone.shearY)) {
-                continue;
-            }
+            if (std::fabs(ax) > 20000.0f || std::fabs(ay) > 20000.0f) continue;
 
             float drot = wrapDeg(arot - bone.rotation);
-            // Inherit modes other than Normal often make updateAppliedTransform
-            // report a ~180° local rotation that is not a real physics swing.
-            // Keep the authored rotation in that case; translation is still safe.
-            const bool rotationUnreliable = std::fabs(drot) > 90.0f;
+            const bool rotationUnreliable = std::fabs(drot) > 90.0f &&
+                                            bone.inherit != Inherit_Normal;
             if (rotationUnreliable) drot = 0.0f;
 
             PoseDelta d;
@@ -217,7 +229,7 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
                 nearlyEqual(d.dshearX, 0.0f) && nearlyEqual(d.dshearY, 0.0f)) {
                 continue;
             }
-            deltas[name] = d;
+            deltas[*bone.name] = d;
 
             bone.x = ax;
             bone.y = ay;
@@ -226,9 +238,63 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
             if (asy != 0.0f) bone.scaleY = asy;
             bone.shearX = ashx;
             bone.shearY = ashy;
-            baked++;
+            bakedBones++;
+        }
+
+        auto rebindVertices = [&](std::vector<float> &vertices, int vertexCount,
+                                  const std::vector<float> &world) -> bool {
+            if (!isWeighted(vertices, vertexCount)) return false;
+            if (world.size() < static_cast<size_t>(vertexCount) * 2) return false;
+            size_t i = 0;
+            for (int v = 0; v < vertexCount && i < vertices.size(); ++v) {
+                int boneCount = static_cast<int>(vertices[i++]);
+                float wx = world[static_cast<size_t>(v) * 2];
+                float wy = world[static_cast<size_t>(v) * 2 + 1];
+                for (int b = 0; b < boneCount && i + 3 < vertices.size(); ++b) {
+                    int boneIndex = static_cast<int>(std::lround(vertices[i]));
+                    if (boneIndex >= 0 && boneIndex < static_cast<int>(skel.getBones().size())) {
+                        float nx, ny;
+                        skel.getBones()[static_cast<size_t>(boneIndex)]->worldToLocal(wx, wy, nx, ny);
+                        if (std::isfinite(nx) && std::isfinite(ny)) {
+                            vertices[i + 1] = nx;
+                            vertices[i + 2] = ny;
+                        }
+                    }
+                    i += 4;
+                }
+            }
+            return true;
+        };
+
+        for (auto &sk : skeleton.skins) {
+            for (auto &[slotName, attachments] : sk.attachments) {
+                for (auto &[attName, attachment] : attachments) {
+                    auto it = worldVerts.find({slotName, attName});
+                    if (it == worldVerts.end()) continue;
+                    bool did = false;
+                    if (attachment.type == AttachmentType_Mesh) {
+                        auto &mesh = std::get<MeshAttachment>(attachment.data);
+                        did = rebindVertices(mesh.vertices, meshVertexCount(mesh), it->second);
+                    } else if (attachment.type == AttachmentType_Path) {
+                        auto &path = std::get<PathAttachment>(attachment.data);
+                        did = rebindVertices(path.vertices, path.vertexCount, it->second);
+                    } else if (attachment.type == AttachmentType_Clipping) {
+                        auto &clip = std::get<ClippingAttachment>(attachment.data);
+                        did = rebindVertices(clip.vertices, clip.vertexCount, it->second);
+                    } else if (attachment.type == AttachmentType_Boundingbox) {
+                        auto &box = std::get<BoundingboxAttachment>(attachment.data);
+                        did = rebindVertices(box.vertices, box.vertexCount, it->second);
+                    }
+                    if (did) {
+                        rebaked.insert({slotName, attName});
+                        rebakedMeshes++;
+                    }
+                }
+            }
         }
     }
+
+    stripDeform(skeleton, rebaked);
 
     for (auto &animation : skeleton.animations) {
         for (auto &[boneName, timelines] : animation.bones) {
@@ -261,8 +327,19 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
         }
     }
 
-    std::cout << "Baked 4.x runtime pose (" << animName
-              << " + physics) into 3.8 setup for " << baked << " physics bones"
-              << " (skipped " << skippedLive << " live IK/transform subjects).\n";
+    // Solved idle+physics is already in setup. Zero leftover 3.8 constraints so
+    // Import Data does not apply them again (especially mixX = -1).
+    for (auto &ik : skeleton.ikConstraints) ik.mix = 0.0f;
+    for (auto &tc : skeleton.transformConstraints) {
+        tc.mixRotate = 0.0f;
+        tc.mixX = 0.0f;
+        tc.mixY = 0.0f;
+        tc.mixScaleX = 0.0f;
+        tc.mixScaleY = 0.0f;
+        tc.mixShearY = 0.0f;
+    }
+
+    std::cout << "Froze 4.x " << animName << "+physics into 3.8 setup: "
+              << bakedBones << " bones, " << rebakedMeshes << " weighted attachments.\n";
     delete runtimeData;
 }
