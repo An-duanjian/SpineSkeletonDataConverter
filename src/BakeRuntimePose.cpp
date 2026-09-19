@@ -9,6 +9,7 @@
 #include <spine/BoneData.h>
 #include <spine/Extension.h>
 #include <spine/IkConstraintData.h>
+#include <spine/PhysicsConstraintData.h>
 #include <spine/Physics.h>
 #include <spine/Skeleton.h>
 #include <spine/SkeletonBinary.h>
@@ -94,6 +95,66 @@ int meshVertexCount(const MeshAttachment &mesh) {
     return static_cast<int>(mesh.vertices.size() / 2);
 }
 
+std::set<int> vertexBoneIndices(const std::vector<float> &vertices, int vertexCount) {
+    std::set<int> out;
+    if (!isWeighted(vertices, vertexCount)) return out;
+    size_t i = 0;
+    for (int v = 0; v < vertexCount && i < vertices.size(); ++v) {
+        int boneCount = static_cast<int>(vertices[i++]);
+        for (int b = 0; b < boneCount && i + 3 < vertices.size(); ++b) {
+            out.insert(static_cast<int>(std::lround(vertices[i])));
+            i += 4;
+        }
+    }
+    return out;
+}
+
+std::pair<std::vector<float> *, int> weightedVerts(Attachment &attachment) {
+    if (attachment.type == AttachmentType_Mesh) {
+        auto &mesh = std::get<MeshAttachment>(attachment.data);
+        return {&mesh.vertices, meshVertexCount(mesh)};
+    }
+    if (attachment.type == AttachmentType_Path) {
+        auto &path = std::get<PathAttachment>(attachment.data);
+        return {&path.vertices, path.vertexCount};
+    }
+    if (attachment.type == AttachmentType_Clipping) {
+        auto &clip = std::get<ClippingAttachment>(attachment.data);
+        return {&clip.vertices, clip.vertexCount};
+    }
+    if (attachment.type == AttachmentType_Boundingbox) {
+        auto &box = std::get<BoundingboxAttachment>(attachment.data);
+        return {&box.vertices, box.vertexCount};
+    }
+    return {nullptr, 0};
+}
+
+bool rebindVerticesToWorlds(std::vector<float> &vertices, int vertexCount,
+                            const std::vector<float> &world,
+                            const std::vector<BoneWorld> &worlds) {
+    if (!isWeighted(vertices, vertexCount)) return false;
+    if (world.size() < static_cast<size_t>(vertexCount) * 2) return false;
+    size_t i = 0;
+    for (int v = 0; v < vertexCount && i < vertices.size(); ++v) {
+        int boneCount = static_cast<int>(vertices[i++]);
+        float wx = world[static_cast<size_t>(v) * 2];
+        float wy = world[static_cast<size_t>(v) * 2 + 1];
+        for (int b = 0; b < boneCount && i + 3 < vertices.size(); ++b) {
+            int boneIndex = static_cast<int>(std::lround(vertices[i]));
+            if (boneIndex >= 0 && boneIndex < static_cast<int>(worlds.size())) {
+                float nx, ny;
+                worldToLocal(worlds[static_cast<size_t>(boneIndex)], wx, wy, nx, ny);
+                if (std::isfinite(nx) && std::isfinite(ny)) {
+                    vertices[i + 1] = nx;
+                    vertices[i + 2] = ny;
+                }
+            }
+            i += 4;
+        }
+    }
+    return true;
+}
+
 }
 
 void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) {
@@ -139,6 +200,8 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
     int rebakedMeshes = 0;
     std::map<std::string, PoseDelta> deltas;
     std::set<std::pair<std::string, std::string>> rebaked;
+    std::map<std::pair<std::string, std::string>, std::vector<float>> worldVerts;
+    std::set<std::pair<std::string, std::string>> rebindKeys;
     {
         spine::Skeleton skel(runtimeData);
         skel.setToSetupPose();
@@ -154,7 +217,6 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
             skel.updateWorldTransform(spine::Physics_Update);
         }
 
-        std::map<std::pair<std::string, std::string>, std::vector<float>> worldVerts;
         spine::Skin *skin = skel.getSkin();
         if (!skin) skin = runtimeData->getDefaultSkin();
         if (skin) {
@@ -188,8 +250,66 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
             }
         }
 
+        std::map<std::string, int> boneIndex;
+        for (int i = 0; i < static_cast<int>(skeleton.bones.size()); ++i) {
+            if (skeleton.bones[static_cast<size_t>(i)].name)
+                boneIndex[*skeleton.bones[static_cast<size_t>(i)].name] = i;
+        }
+        std::set<int> physicsIdx;
+        for (size_t i = 0; i < runtimeData->getPhysicsConstraints().size(); ++i) {
+            auto *bone = runtimeData->getPhysicsConstraints()[i]->getBone();
+            if (!bone) continue;
+            auto it = boneIndex.find(bone->getName().buffer());
+            if (it != boneIndex.end()) physicsIdx.insert(it->second);
+        }
+
+        std::set<int> bakeIdx = physicsIdx;
+        for (auto &sk : skeleton.skins) {
+            for (auto &[slotName, attachments] : sk.attachments) {
+                for (auto &[attName, attachment] : attachments) {
+                    auto [verts, vc] = weightedVerts(attachment);
+                    if (!verts || vc <= 0) continue;
+                    auto used = vertexBoneIndices(*verts, vc);
+                    bool hasPhysics = false;
+                    for (int idx : used) {
+                        if (physicsIdx.contains(idx)) { hasPhysics = true; break; }
+                    }
+                    if (!hasPhysics) continue;
+                    bakeIdx.insert(used.begin(), used.end());
+                    rebindKeys.insert({slotName, attName});
+                }
+            }
+        }
+        bool grew = true;
+        while (grew) {
+            grew = false;
+            for (int idx : std::vector<int>(bakeIdx.begin(), bakeIdx.end())) {
+                auto &bone = skeleton.bones[static_cast<size_t>(idx)];
+                if (!bone.parent) continue;
+                auto pit = boneIndex.find(*bone.parent);
+                if (pit != boneIndex.end() && bakeIdx.insert(pit->second).second) grew = true;
+            }
+        }
+        for (auto &sk : skeleton.skins) {
+            for (auto &[slotName, attachments] : sk.attachments) {
+                for (auto &[attName, attachment] : attachments) {
+                    auto [verts, vc] = weightedVerts(attachment);
+                    if (!verts || vc <= 0) continue;
+                    auto used = vertexBoneIndices(*verts, vc);
+                    for (int idx : used) {
+                        if (bakeIdx.contains(idx)) {
+                            rebindKeys.insert({slotName, attName});
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         for (auto &bone : skeleton.bones) {
             if (!bone.name) continue;
+            auto iit = boneIndex.find(*bone.name);
+            if (iit == boneIndex.end() || !bakeIdx.contains(iit->second)) continue;
             spine::Bone *rb = skel.findBone(bone.name->c_str());
             if (!rb) continue;
 
@@ -240,52 +360,19 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
             bone.shearY = ashy;
             bakedBones++;
         }
+    }
 
-        auto rebindVertices = [&](std::vector<float> &vertices, int vertexCount,
-                                  const std::vector<float> &world) -> bool {
-            if (!isWeighted(vertices, vertexCount)) return false;
-            if (world.size() < static_cast<size_t>(vertexCount) * 2) return false;
-            size_t i = 0;
-            for (int v = 0; v < vertexCount && i < vertices.size(); ++v) {
-                int boneCount = static_cast<int>(vertices[i++]);
-                float wx = world[static_cast<size_t>(v) * 2];
-                float wy = world[static_cast<size_t>(v) * 2 + 1];
-                for (int b = 0; b < boneCount && i + 3 < vertices.size(); ++b) {
-                    int boneIndex = static_cast<int>(std::lround(vertices[i]));
-                    if (boneIndex >= 0 && boneIndex < static_cast<int>(skel.getBones().size())) {
-                        float nx, ny;
-                        skel.getBones()[static_cast<size_t>(boneIndex)]->worldToLocal(wx, wy, nx, ny);
-                        if (std::isfinite(nx) && std::isfinite(ny)) {
-                            vertices[i + 1] = nx;
-                            vertices[i + 2] = ny;
-                        }
-                    }
-                    i += 4;
-                }
-            }
-            return true;
-        };
-
+    {
+        auto worlds = computeBoneWorlds(skeleton);
         for (auto &sk : skeleton.skins) {
             for (auto &[slotName, attachments] : sk.attachments) {
                 for (auto &[attName, attachment] : attachments) {
+                    if (!rebindKeys.contains({slotName, attName})) continue;
                     auto it = worldVerts.find({slotName, attName});
                     if (it == worldVerts.end()) continue;
-                    bool did = false;
-                    if (attachment.type == AttachmentType_Mesh) {
-                        auto &mesh = std::get<MeshAttachment>(attachment.data);
-                        did = rebindVertices(mesh.vertices, meshVertexCount(mesh), it->second);
-                    } else if (attachment.type == AttachmentType_Path) {
-                        auto &path = std::get<PathAttachment>(attachment.data);
-                        did = rebindVertices(path.vertices, path.vertexCount, it->second);
-                    } else if (attachment.type == AttachmentType_Clipping) {
-                        auto &clip = std::get<ClippingAttachment>(attachment.data);
-                        did = rebindVertices(clip.vertices, clip.vertexCount, it->second);
-                    } else if (attachment.type == AttachmentType_Boundingbox) {
-                        auto &box = std::get<BoundingboxAttachment>(attachment.data);
-                        did = rebindVertices(box.vertices, box.vertexCount, it->second);
-                    }
-                    if (did) {
+                    auto [verts, vc] = weightedVerts(attachment);
+                    if (!verts || vc <= 0) continue;
+                    if (rebindVerticesToWorlds(*verts, vc, it->second, worlds)) {
                         rebaked.insert({slotName, attName});
                         rebakedMeshes++;
                     }

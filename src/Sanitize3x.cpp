@@ -288,10 +288,6 @@ bool meshNeedsWeightBake(const std::vector<float>& vertices, int vertexCount) {
     return false;
 }
 
-struct BoneWorld {
-    float a = 1, b = 0, c = 0, d = 1, x = 0, y = 0;
-};
-
 float cosDeg(float deg) { return std::cos(deg * static_cast<float>(3.14159265358979323846 / 180.0)); }
 float sinDeg(float deg) { return std::sin(deg * static_cast<float>(3.14159265358979323846 / 180.0)); }
 
