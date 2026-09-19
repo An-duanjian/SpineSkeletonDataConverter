@@ -250,158 +250,280 @@ bool isWeightedVertices(const std::vector<float>& vertices, int vertexCount) {
     return vertexCount > 0 && vertices.size() != static_cast<size_t>(vertexCount * 2);
 }
 
-struct Influence {
-    int bone = 0;
-    float x = 0, y = 0, w = 0;
-};
-
-struct DeformInfluenceRemap {
-    std::vector<char> keep;
-};
-
-bool limitVertexInfluences(std::vector<float>& vertices, int vertexCount, int maxBones, DeformInfluenceRemap& remap) {
-    if (!isWeightedVertices(vertices, vertexCount) || maxBones < 1) return false;
-
-    std::vector<float> out;
-    out.reserve(vertices.size());
-    remap.keep.clear();
-    bool changed = false;
+bool meshNeedsWeightBake(const std::vector<float>& vertices, int vertexCount) {
+    if (!isWeightedVertices(vertices, vertexCount)) return false;
     size_t i = 0;
     for (int v = 0; v < vertexCount && i < vertices.size(); ++v) {
         int boneCount = static_cast<int>(vertices[i++]);
-        std::vector<Influence> influences;
-        influences.reserve(std::max(boneCount, 0));
-        for (int b = 0; b < boneCount && i + 3 < vertices.size(); ++b) {
-            Influence inf;
-            inf.bone = static_cast<int>(std::lround(vertices[i++]));
-            inf.x = vertices[i++];
-            inf.y = vertices[i++];
-            inf.w = vertices[i++];
-            influences.push_back(inf);
-        }
-
-        std::vector<char> keep(influences.size(), 1);
-        if (static_cast<int>(influences.size()) > maxBones) {
-            changed = true;
-            std::vector<int> order(influences.size());
-            for (size_t n = 0; n < order.size(); ++n) order[n] = static_cast<int>(n);
-            std::partial_sort(order.begin(), order.begin() + maxBones, order.end(),
-                              [&](int a, int b) { return influences[static_cast<size_t>(a)].w > influences[static_cast<size_t>(b)].w; });
-            std::fill(keep.begin(), keep.end(), 0);
-            for (int n = 0; n < maxBones; ++n) keep[static_cast<size_t>(order[static_cast<size_t>(n)])] = 1;
-        }
-        remap.keep.insert(remap.keep.end(), keep.begin(), keep.end());
-
-        std::vector<Influence> kept;
-        kept.reserve(static_cast<size_t>(maxBones));
-        for (size_t n = 0; n < influences.size(); ++n) {
-            if (keep[n]) kept.push_back(influences[n]);
-        }
-        float sum = 0.0f;
-        for (const auto& inf : kept) sum += inf.w;
-        if (sum > 0.0f) {
-            for (auto& inf : kept) inf.w /= sum;
-        }
-        out.push_back(static_cast<float>(kept.size()));
-        for (const auto& inf : kept) {
-            out.push_back(static_cast<float>(inf.bone));
-            out.push_back(inf.x);
-            out.push_back(inf.y);
-            out.push_back(inf.w);
-        }
+        if (boneCount > 4) return true;
+        i += static_cast<size_t>(std::max(boneCount, 0)) * 4;
     }
-    vertices.swap(out);
-    return changed;
+    return false;
 }
 
-void remapDeformFrame(TimelineFrame& frame, const DeformInfluenceRemap& remap) {
-    if (remap.keep.empty()) return;
-    const int oldCount = static_cast<int>(remap.keep.size());
-    const int oldFloats = oldCount * 2;
-    std::vector<float> full(static_cast<size_t>(oldFloats), 0.0f);
-    if (!frame.vertices.empty()) {
-        int start = frame.int1;
-        if (start < 0) start = 0;
-        for (size_t n = 0; n < frame.vertices.size(); ++n) {
-            int dst = start + static_cast<int>(n);
-            if (dst >= 0 && dst < oldFloats) full[static_cast<size_t>(dst)] = frame.vertices[n];
-        }
+struct BoneWorld {
+    float a = 1, b = 0, c = 0, d = 1, x = 0, y = 0;
+};
+
+float cosDeg(float deg) { return std::cos(deg * static_cast<float>(3.14159265358979323846 / 180.0)); }
+float sinDeg(float deg) { return std::sin(deg * static_cast<float>(3.14159265358979323846 / 180.0)); }
+
+void applySetupTransformConstraints(const SkeletonData& skeleton, std::vector<BoneWorld>& worlds) {
+    std::map<std::string, int> index;
+    for (int i = 0; i < static_cast<int>(skeleton.bones.size()); ++i) {
+        if (skeleton.bones[static_cast<size_t>(i)].name)
+            index[*skeleton.bones[static_cast<size_t>(i)].name] = i;
     }
-
-    std::vector<float> neu;
-    neu.reserve(static_cast<size_t>(oldFloats));
-    for (int inf = 0; inf < oldCount; ++inf) {
-        if (!remap.keep[static_cast<size_t>(inf)]) continue;
-        neu.push_back(full[static_cast<size_t>(inf * 2)]);
-        neu.push_back(full[static_cast<size_t>(inf * 2 + 1)]);
-    }
-
-    size_t begin = 0;
-    while (begin < neu.size() && neu[begin] == 0.0f) ++begin;
-    size_t end = neu.size();
-    while (end > begin && neu[end - 1] == 0.0f) --end;
-    frame.int1 = static_cast<int>(begin);
-    frame.vertices.assign(neu.begin() + static_cast<std::ptrdiff_t>(begin), neu.begin() + static_cast<std::ptrdiff_t>(end));
-}
-
-void remapAnimationDeforms(SkeletonData& skeleton, const std::map<std::string, DeformInfluenceRemap>& remaps) {
-    if (remaps.empty()) return;
-    int remapped = 0;
-    for (auto& animation : skeleton.animations) {
-        for (auto& [skinName, skinMap] : animation.attachments) {
-            for (auto& [slotName, slotMap] : skinMap) {
-                for (auto& [attachmentName, timelines] : slotMap) {
-                    auto it = remaps.find(skinName + "\n" + slotName + "\n" + attachmentName);
-                    if (it == remaps.end()) it = remaps.find(std::string("default\n") + slotName + "\n" + attachmentName);
-                    if (it == remaps.end()) continue;
-                    auto deformIt = timelines.find("deform");
-                    if (deformIt == timelines.end()) continue;
-                    for (auto& frame : deformIt->second) {
-                        remapDeformFrame(frame, it->second);
-                    }
-                    remapped++;
+    constexpr float pi = static_cast<float>(3.14159265358979323846);
+    auto constraints = skeleton.transformConstraints;
+    std::sort(constraints.begin(), constraints.end(), [](const TransformConstraintData& a, const TransformConstraintData& b) {
+        return a.order < b.order;
+    });
+    for (const auto& tc : constraints) {
+        if (tc.local || tc.relative) continue;
+        if (!tc.target || !index.contains(*tc.target)) continue;
+        const BoneWorld& target = worlds[static_cast<size_t>(index[*tc.target])];
+        float ta = target.a, tb = target.b, tcA = target.c, td = target.d;
+        float degRadReflect = (ta * td - tb * tcA > 0) ? (pi / 180.0f) : (-pi / 180.0f);
+        float offsetRotation = tc.offsetRotation * degRadReflect;
+        bool translate = tc.mixX != 0.0f || tc.mixY != 0.0f;
+        for (const auto& boneName : tc.bones) {
+            if (!index.contains(boneName)) continue;
+            BoneWorld& bone = worlds[static_cast<size_t>(index[boneName])];
+            if (tc.mixRotate != 0.0f) {
+                float r = std::atan2(tcA, ta) - std::atan2(bone.c, bone.a) + offsetRotation;
+                if (r > pi) r -= pi * 2.0f;
+                else if (r < -pi) r += pi * 2.0f;
+                r *= tc.mixRotate;
+                float cosine = std::cos(r), sine = std::sin(r);
+                float a = bone.a, b = bone.b, c = bone.c, d = bone.d;
+                bone.a = cosine * a - sine * c;
+                bone.b = cosine * b - sine * d;
+                bone.c = sine * a + cosine * c;
+                bone.d = sine * b + cosine * d;
+            }
+            if (translate) {
+                float tx = ta * tc.offsetX + tb * tc.offsetY + target.x;
+                float ty = tcA * tc.offsetX + td * tc.offsetY + target.y;
+                bone.x += (tx - bone.x) * tc.mixX;
+                bone.y += (ty - bone.y) * tc.mixY;
+            }
+            if (tc.mixScaleX > 0.0f) {
+                float s = std::sqrt(bone.a * bone.a + bone.c * bone.c);
+                if (s != 0.0f) {
+                    s = (s + (std::sqrt(ta * ta + tcA * tcA) - s + tc.offsetScaleX) * tc.mixScaleX) / s;
+                    bone.a *= s;
+                    bone.c *= s;
+                }
+            }
+            if (tc.mixScaleY > 0.0f) {
+                float s = std::sqrt(bone.b * bone.b + bone.d * bone.d);
+                if (s != 0.0f) {
+                    s = (s + (std::sqrt(tb * tb + td * td) - s + tc.offsetScaleY) * tc.mixScaleY) / s;
+                    bone.b *= s;
+                    bone.d *= s;
                 }
             }
         }
     }
-    std::cout << "Remapped deform timelines for " << remapped << " attachments after weight clamp.\n";
 }
 
-void limitWeightedInfluencesFor3x(SkeletonData& skeleton) {
-    constexpr int kMaxBones = 4;
-    int clamped = 0;
-    std::map<std::string, DeformInfluenceRemap> remaps;
-    auto clampAttachment = [&](const std::string& skinName, const std::string& slotName,
-                               const std::string& attachmentName, std::vector<float>& vertices, int vertexCount) {
-        if (!isWeightedVertices(vertices, vertexCount)) return;
-        DeformInfluenceRemap remap;
-        if (limitVertexInfluences(vertices, vertexCount, kMaxBones, remap) && !remap.keep.empty()) {
-            remaps[skinName + "\n" + slotName + "\n" + attachmentName] = std::move(remap);
-            clamped++;
+std::vector<BoneWorld> computeBoneWorlds(const SkeletonData& skeleton) {
+    std::map<std::string, int> index;
+    for (int i = 0; i < static_cast<int>(skeleton.bones.size()); ++i) {
+        if (skeleton.bones[static_cast<size_t>(i)].name) index[*skeleton.bones[static_cast<size_t>(i)].name] = i;
+    }
+    std::vector<BoneWorld> worlds(skeleton.bones.size());
+    for (int i = 0; i < static_cast<int>(skeleton.bones.size()); ++i) {
+        const BoneData& bone = skeleton.bones[static_cast<size_t>(i)];
+        int parent = -1;
+        if (bone.parent && index.contains(*bone.parent)) parent = index[*bone.parent];
+        float rotation = bone.rotation, scaleX = bone.scaleX, scaleY = bone.scaleY;
+        float shearX = bone.shearX, shearY = bone.shearY, x = bone.x, y = bone.y;
+        if (parent < 0) {
+            float rotationY = rotation + 90.0f + shearY;
+            worlds[static_cast<size_t>(i)] = {
+                cosDeg(rotation + shearX) * scaleX,
+                cosDeg(rotationY) * scaleY,
+                sinDeg(rotation + shearX) * scaleX,
+                sinDeg(rotationY) * scaleY,
+                x, y
+            };
+            continue;
         }
-    };
+        const BoneWorld& pworld = worlds[static_cast<size_t>(parent)];
+        BoneWorld w;
+        w.x = pworld.a * x + pworld.b * y + pworld.x;
+        w.y = pworld.c * x + pworld.d * y + pworld.y;
+        float pa = pworld.a, pb = pworld.b, pc = pworld.c, pd = pworld.d;
+        switch (bone.inherit) {
+            case Inherit_OnlyTranslation: {
+                float rotationY = rotation + 90.0f + shearY;
+                w.a = cosDeg(rotation + shearX) * scaleX;
+                w.b = cosDeg(rotationY) * scaleY;
+                w.c = sinDeg(rotation + shearX) * scaleX;
+                w.d = sinDeg(rotationY) * scaleY;
+                break;
+            }
+            case Inherit_NoRotationOrReflection: {
+                float s = pa * pa + pc * pc;
+                float prx;
+                if (s > 0.0001f) {
+                    s = std::abs(pa * pd - pb * pc) / s;
+                    pb = pc * s;
+                    pd = pa * s;
+                    prx = std::atan2(pc, pa) * static_cast<float>(180.0 / 3.14159265358979323846);
+                } else {
+                    pa = 0;
+                    pc = 0;
+                    prx = 90.0f - std::atan2(pd, pb) * static_cast<float>(180.0 / 3.14159265358979323846);
+                }
+                float rx = rotation + shearX - prx;
+                float ry = rotation + shearY - prx + 90.0f;
+                float la = cosDeg(rx) * scaleX;
+                float lb = cosDeg(ry) * scaleY;
+                float lc = sinDeg(rx) * scaleX;
+                float ld = sinDeg(ry) * scaleY;
+                w.a = pa * la - pb * lc;
+                w.b = pa * lb - pb * ld;
+                w.c = pc * la + pd * lc;
+                w.d = pc * lb + pd * ld;
+                break;
+            }
+            case Inherit_NoScale:
+            case Inherit_NoScaleOrReflection: {
+                float cosine = cosDeg(rotation);
+                float sine = sinDeg(rotation);
+                float za = pa * cosine + pb * sine;
+                float zc = pc * cosine + pd * sine;
+                float s = std::sqrt(za * za + zc * zc);
+                if (s > 0.00001f) s = 1.0f / s;
+                za *= s;
+                zc *= s;
+                s = std::sqrt(za * za + zc * zc);
+                if (bone.inherit == Inherit_NoScale && (pa * pd - pb * pc < 0)) s = -s;
+                float rot90 = static_cast<float>(3.14159265358979323846 / 2.0) + std::atan2(zc, za);
+                float zb = std::cos(rot90) * s;
+                float zd = std::sin(rot90) * s;
+                float la = cosDeg(shearX) * scaleX;
+                float lb = cosDeg(90.0f + shearY) * scaleY;
+                float lc = sinDeg(shearX) * scaleX;
+                float ld = sinDeg(90.0f + shearY) * scaleY;
+                w.a = za * la + zb * lc;
+                w.b = za * lb + zb * ld;
+                w.c = zc * la + zd * lc;
+                w.d = zc * lb + zd * ld;
+                break;
+            }
+            case Inherit_Normal:
+            default: {
+                float rotationY = rotation + 90.0f + shearY;
+                float la = cosDeg(rotation + shearX) * scaleX;
+                float lb = cosDeg(rotationY) * scaleY;
+                float lc = sinDeg(rotation + shearX) * scaleX;
+                float ld = sinDeg(rotationY) * scaleY;
+                w.a = pa * la + pb * lc;
+                w.b = pa * lb + pb * ld;
+                w.c = pc * la + pd * lc;
+                w.d = pc * lb + pd * ld;
+                break;
+            }
+        }
+        worlds[static_cast<size_t>(i)] = w;
+    }
+    applySetupTransformConstraints(skeleton, worlds);
+    return worlds;
+}
 
+void worldToLocal(const BoneWorld& bone, float worldX, float worldY, float& localX, float& localY) {
+    float inv = bone.a * bone.d - bone.b * bone.c;
+    float dx = worldX - bone.x;
+    float dy = worldY - bone.y;
+    if (std::abs(inv) < 1e-8f) {
+        localX = dx;
+        localY = dy;
+        return;
+    }
+    inv = 1.0f / inv;
+    localX = (dx * bone.d - dy * bone.b) * inv;
+    localY = (dy * bone.a - dx * bone.c) * inv;
+}
+
+void bakeMeshToUnweighted(MeshAttachment& mesh, const BoneWorld& slotBone, const std::vector<BoneWorld>& worlds) {
+    int vertexCount = static_cast<int>(mesh.uvs.size() / 2);
+    if (vertexCount <= 0 || !isWeightedVertices(mesh.vertices, vertexCount)) return;
+    std::vector<float> local(static_cast<size_t>(vertexCount) * 2, 0.0f);
+    size_t i = 0;
+    for (int v = 0; v < vertexCount && i < mesh.vertices.size(); ++v) {
+        int boneCount = static_cast<int>(mesh.vertices[i++]);
+        float wx = 0, wy = 0;
+        for (int b = 0; b < boneCount && i + 3 < mesh.vertices.size(); ++b) {
+            int boneIndex = static_cast<int>(std::lround(mesh.vertices[i++]));
+            float lx = mesh.vertices[i++];
+            float ly = mesh.vertices[i++];
+            float weight = mesh.vertices[i++];
+            if (boneIndex < 0 || boneIndex >= static_cast<int>(worlds.size())) continue;
+            const BoneWorld& bw = worlds[static_cast<size_t>(boneIndex)];
+            wx += weight * (bw.a * lx + bw.b * ly + bw.x);
+            wy += weight * (bw.c * lx + bw.d * ly + bw.y);
+        }
+        worldToLocal(slotBone, wx, wy, local[static_cast<size_t>(v) * 2], local[static_cast<size_t>(v) * 2 + 1]);
+    }
+    mesh.vertices.swap(local);
+}
+
+void stripDeformForAttachments(SkeletonData& skeleton, const std::set<std::string>& bakedKeys) {
+    if (bakedKeys.empty()) return;
+    for (auto& animation : skeleton.animations) {
+        for (auto skinIt = animation.attachments.begin(); skinIt != animation.attachments.end();) {
+            for (auto slotIt = skinIt->second.begin(); slotIt != skinIt->second.end();) {
+                for (auto attIt = slotIt->second.begin(); attIt != slotIt->second.end();) {
+                    std::string key = skinIt->first + "\n" + slotIt->first + "\n" + attIt->first;
+                    if (bakedKeys.contains(key)) attIt = slotIt->second.erase(attIt);
+                    else ++attIt;
+                }
+                if (slotIt->second.empty()) slotIt = skinIt->second.erase(slotIt);
+                else ++slotIt;
+            }
+            if (skinIt->second.empty()) skinIt = animation.attachments.erase(skinIt);
+            else ++skinIt;
+        }
+    }
+}
+
+void bakeHighInfluenceMeshesFor3x(SkeletonData& skeleton) {
+    std::map<std::string, int> slotBoneIndex;
+    std::map<std::string, int> boneIndex;
+    for (int i = 0; i < static_cast<int>(skeleton.bones.size()); ++i) {
+        if (skeleton.bones[static_cast<size_t>(i)].name)
+            boneIndex[*skeleton.bones[static_cast<size_t>(i)].name] = i;
+    }
+    for (const auto& slot : skeleton.slots) {
+        if (!slot.name || !slot.bone) continue;
+        auto it = boneIndex.find(*slot.bone);
+        if (it != boneIndex.end()) slotBoneIndex[*slot.name] = it->second;
+    }
+
+    auto worlds = computeBoneWorlds(skeleton);
+    std::set<std::string> bakedKeys;
+    int baked = 0;
     for (auto& skin : skeleton.skins) {
         for (auto& [slotName, slotMap] : skin.attachments) {
             for (auto& [attachmentName, attachment] : slotMap) {
-                if (attachment.type == AttachmentType_Mesh) {
-                    auto& mesh = std::get<MeshAttachment>(attachment.data);
-                    clampAttachment(skin.name, slotName, attachmentName, mesh.vertices, static_cast<int>(mesh.uvs.size() / 2));
-                } else if (attachment.type == AttachmentType_Path) {
-                    auto& path = std::get<PathAttachment>(attachment.data);
-                    clampAttachment(skin.name, slotName, attachmentName, path.vertices, path.vertexCount);
-                } else if (attachment.type == AttachmentType_Clipping) {
-                    auto& clipping = std::get<ClippingAttachment>(attachment.data);
-                    clampAttachment(skin.name, slotName, attachmentName, clipping.vertices, clipping.vertexCount);
-                } else if (attachment.type == AttachmentType_Boundingbox) {
-                    auto& box = std::get<BoundingboxAttachment>(attachment.data);
-                    clampAttachment(skin.name, slotName, attachmentName, box.vertices, box.vertexCount);
-                }
+                if (attachment.type != AttachmentType_Mesh) continue;
+                auto& mesh = std::get<MeshAttachment>(attachment.data);
+                int vertexCount = static_cast<int>(mesh.uvs.size() / 2);
+                if (!isWeightedVertices(mesh.vertices, vertexCount)) continue;
+                auto slotIt = slotBoneIndex.find(slotName);
+                if (slotIt == slotBoneIndex.end()) continue;
+                bakeMeshToUnweighted(mesh, worlds[static_cast<size_t>(slotIt->second)], worlds);
+                bakedKeys.insert(skin.name + "\n" + slotName + "\n" + attachmentName);
+                baked++;
             }
         }
     }
-    remapAnimationDeforms(skeleton, remaps);
-    std::cout << "Limited weighted vertices to " << kMaxBones << " bones for " << clamped << " attachments (Spine 3.8 editor).\n";
+    stripDeformForAttachments(skeleton, bakedKeys);
+    std::cout << "Baked " << baked << " weighted meshes to unweighted setup verts for Spine 3.8 editor.\n";
 }
 
 void sanitizeSkeletonDataFor3x(SkeletonData& skeleton) {

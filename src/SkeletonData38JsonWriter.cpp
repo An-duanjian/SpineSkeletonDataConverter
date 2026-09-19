@@ -38,8 +38,8 @@ Json writeJsonData(const SkeletonData& skeletonData) {
     skeleton["y"] = skeletonData.y;
     skeleton["width"] = skeletonData.width;
     skeleton["height"] = skeletonData.height;
-    if (skeletonData.fps != 30.0f) skeleton["fps"] = skeletonData.fps;
-    if (skeletonData.imagesPath) skeleton["images"] = skeletonData.imagesPath;
+    skeleton["fps"] = skeletonData.fps != 0.0f ? skeletonData.fps : 30.0f;
+    skeleton["images"] = skeletonData.imagesPath.value_or("./images");
     if (skeletonData.audioPath) skeleton["audio"] = skeletonData.audioPath;
     j["skeleton"] = skeleton;
 
