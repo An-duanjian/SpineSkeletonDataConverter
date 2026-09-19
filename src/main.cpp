@@ -260,7 +260,8 @@ bool convertFile(const std::string& inputFile, const std::string& outputFile,
                 fillMeshSizesFromAtlas(skelData, "");
             }
             // 3.8.75 Import Data (ka.json hull<<1 / kR hull>=6, edges, atlas sizes).
-            // Weights are left unchanged: the editor does not cap influences per vertex.
+            // Do not freeze idle/physics into setup: animations and constraint mixes
+            // must keep working. Weights stay authored so setup is not 错位.
             normalizeMeshHullFor3x(skelData);
             generateMissingMeshEdges(skelData);
             bakeHighInfluenceMeshesFor3x(skelData);
