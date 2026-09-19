@@ -175,8 +175,11 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
         return tc.mixRotate != 0.0f || tc.mixX != 0.0f || tc.mixY != 0.0f ||
                tc.mixScaleX != 0.0f || tc.mixScaleY != 0.0f || tc.mixShearY != 0.0f;
     };
+    auto invertTranslateMix = [](const TransformConstraintData &tc) {
+        return tc.mixX < 0.0f || tc.mixY < 0.0f;
+    };
     for (const auto &tc : skeleton.transformConstraints) {
-        if (!transformMixActive(tc)) continue;
+        if (!transformMixActive(tc) || invertTranslateMix(tc)) continue;
         for (const auto &boneName : tc.bones) liveConstraintBones.insert(boneName);
     }
 
@@ -375,8 +378,19 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
     }
 
     // Solved IK is already in baked locals. Zero setup IK mix so Import Data
-    // does not apply it again. Transform mixes stay live (tousheng / mixX=-1).
+    // does not apply it again. mixX=-1 helpers are baked then disabled so they
+    // cannot invert the head a second time. tousheng-style mixes stay live.
     for (auto &ik : skeleton.ikConstraints) ik.mix = 0.0f;
+    for (auto &tc : skeleton.transformConstraints) {
+        if (tc.mixX < 0.0f || tc.mixY < 0.0f) {
+            tc.mixRotate = 0.0f;
+            tc.mixX = 0.0f;
+            tc.mixY = 0.0f;
+            tc.mixScaleX = 0.0f;
+            tc.mixScaleY = 0.0f;
+            tc.mixShearY = 0.0f;
+        }
+    }
 
     std::cout << "Baked idle+physics into 3.8 setup (transform subjects kept live): "
               << bakedBones << " bones, " << rebakedMeshes << " meshes.\n";
