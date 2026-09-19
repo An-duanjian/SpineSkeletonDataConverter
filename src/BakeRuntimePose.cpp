@@ -171,7 +171,12 @@ void bakeRuntimePoseFor3x(SkeletonData &skeleton, const std::string &inputFile) 
     }
 
     std::set<std::string> liveConstraintBones;
+    auto transformMixActive = [](const TransformConstraintData &tc) {
+        return tc.mixRotate != 0.0f || tc.mixX != 0.0f || tc.mixY != 0.0f ||
+               tc.mixScaleX != 0.0f || tc.mixScaleY != 0.0f || tc.mixShearY != 0.0f;
+    };
     for (const auto &tc : skeleton.transformConstraints) {
+        if (!transformMixActive(tc)) continue;
         for (const auto &boneName : tc.bones) liveConstraintBones.insert(boneName);
     }
 
