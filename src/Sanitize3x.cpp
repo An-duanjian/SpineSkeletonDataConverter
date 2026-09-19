@@ -201,7 +201,7 @@ void pruneEmptyTimelines(MultiTimeline& timelines) {
 }
 
 void normalizeMeshHullFor3x(SkeletonData& skeleton) {
-    int converted = 0;
+    int clamped = 0;
     for (auto& skin : skeleton.skins) {
         for (auto& [slotName, slotMap] : skin.attachments) {
             for (auto& [attachmentName, attachment] : slotMap) {
@@ -209,22 +209,23 @@ void normalizeMeshHullFor3x(SkeletonData& skeleton) {
                 auto& mesh = std::get<MeshAttachment>(attachment.data);
                 int vertexCount = static_cast<int>(mesh.uvs.size() / 2);
                 if (vertexCount <= 0 || mesh.hullLength <= 0) continue;
-                int triangleCount = static_cast<int>(mesh.triangles.size() / 3);
-                if (mesh.hullLength % 2 == 0 &&
-                    (vertexCount * 2 - mesh.hullLength - 2) == triangleCount) {
-                    mesh.hullLength /= 2;
-                    converted++;
+                // 4.2 binary hull is the hull vertex count H (T = 2V - H - 2).
+                // 3.8.75 JSON hull is also H (the editor then does H << 1 internally).
+                // Do not halve: 2V-T-2 == H, not 2H. Halving collapsed jiu3/hair hulls.
+                if (mesh.hullLength > vertexCount) {
+                    mesh.hullLength = vertexCount;
+                    clamped++;
                 }
-                if (mesh.hullLength > vertexCount) mesh.hullLength = vertexCount;
-                // Spine 3.8.75 Import Data: JSON hull is vertex count, then << 1.
-                // Internal hull must be >= 6, so JSON hull must be >= 3.
                 if (mesh.hullLength > 0 && mesh.hullLength < 3) {
                     mesh.hullLength = vertexCount >= 3 ? vertexCount : 0;
+                    clamped++;
                 }
             }
         }
     }
-    std::cout << "Normalized " << converted << " mesh hull values from 4.x world-units to 3.8 JSON vertex counts.\n";
+    if (clamped > 0) {
+        std::cout << "Clamped " << clamped << " mesh hull values for 3.8 JSON vertex counts.\n";
+    }
 }
 
 void generateMissingMeshEdges(SkeletonData& skeleton) {
